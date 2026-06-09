@@ -18,7 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +41,8 @@ from local_tools.batch_download import (  # noqa: E402
 
 
 VIDEO_TYPES = {0, 4, 51, 55, 58, 61}
+WHISPER_MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
+WHISPER_MODEL_LOCK = threading.Lock()
 
 
 @dataclass
@@ -86,6 +88,35 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
+def cookie_profile_path(config: Dict[str, Any], creator: Optional[Dict[str, Any]] = None) -> Path:
+    profile_name = str((creator or {}).get("cookie_profile") or config.get("default_cookie_profile") or "default")
+    profiles = config.get("douyin_cookie_profiles") or config.get("cookie_profiles") or {}
+
+    if isinstance(profiles, dict):
+        entry = profiles.get(profile_name)
+        if isinstance(entry, dict):
+            value = entry.get("file") or entry.get("path") or entry.get("cookie_file")
+            if value:
+                return project_path(str(value))
+        elif isinstance(entry, str):
+            return project_path(entry)
+    elif isinstance(profiles, list):
+        for entry in profiles:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or entry.get("key") or entry.get("profile") or "")
+            if name == profile_name:
+                value = entry.get("file") or entry.get("path") or entry.get("cookie_file")
+                if value:
+                    return project_path(str(value))
+
+    return project_path(str(config.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
+
+
+def apply_cookie_for_creator(config: Dict[str, Any], creator: Optional[Dict[str, Any]] = None) -> None:
+    apply_runtime_cookies(read_secret_file(cookie_profile_path(config, creator)), None)
+
+
 def ensure_state(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -112,7 +143,193 @@ def ensure_state(conn: sqlite3.Connection) -> None:
         ON videos (creator_key, status)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            status TEXT NOT NULL,
+            creator_filter TEXT,
+            total_creators INTEGER DEFAULT 0,
+            detected_count INTEGER DEFAULT 0,
+            planned_count INTEGER DEFAULT 0,
+            success_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            skipped_count INTEGER DEFAULT 0,
+            current_stage TEXT,
+            current_creator TEXT,
+            current_video_id TEXT,
+            error TEXT,
+            output_path TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_items (
+            run_id TEXT NOT NULL,
+            video_id TEXT NOT NULL,
+            creator_key TEXT NOT NULL,
+            creator_name TEXT NOT NULL,
+            title TEXT,
+            source_url TEXT,
+            status TEXT NOT NULL,
+            stage TEXT,
+            error TEXT,
+            markdown_path TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (run_id, video_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_run_items_run_status
+        ON run_items (run_id, status)
+        """
+    )
     conn.commit()
+
+
+def default_run_id() -> str:
+    return "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def update_run_counts(conn: sqlite3.Connection, run_id: str) -> None:
+    row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status IN ('pending', 'running', 'success', 'failed', 'dry_run') THEN 1 ELSE 0 END)
+        FROM run_items
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    success_count, failed_count, skipped_count, planned_count = [int(value or 0) for value in row]
+    conn.execute(
+        """
+        UPDATE runs SET
+            success_count = ?,
+            failed_count = ?,
+            skipped_count = ?,
+            planned_count = ?,
+            updated_at = ?
+        WHERE run_id = ?
+        """,
+        (success_count, failed_count, skipped_count, planned_count, utc_now(), run_id),
+    )
+    conn.commit()
+
+
+def start_run(conn: sqlite3.Connection, run_id: str, creator_filter: Optional[str], total_creators: int) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO runs (
+            run_id, started_at, ended_at, status, creator_filter, total_creators,
+            detected_count, planned_count, success_count, failed_count, skipped_count,
+            current_stage, current_creator, current_video_id, error, output_path, updated_at
+        )
+        VALUES (?, ?, NULL, 'running', ?, ?, 0, 0, 0, 0, 0, '准备启动', '', '', NULL, NULL, ?)
+        """,
+        (run_id, now, creator_filter, total_creators, now),
+    )
+    conn.commit()
+
+
+def update_run(
+    conn: sqlite3.Connection,
+    run_id: str,
+    *,
+    status: Optional[str] = None,
+    current_stage: Optional[str] = None,
+    current_creator: Optional[str] = None,
+    current_video_id: Optional[str] = None,
+    detected_count: Optional[int] = None,
+    output_path: Optional[Path] = None,
+    error: Optional[str] = None,
+    ended: bool = False,
+) -> None:
+    fields = ["updated_at = ?"]
+    values: List[Any] = [utc_now()]
+    if status is not None:
+        fields.append("status = ?")
+        values.append(status)
+    if current_stage is not None:
+        fields.append("current_stage = ?")
+        values.append(current_stage)
+    if current_creator is not None:
+        fields.append("current_creator = ?")
+        values.append(current_creator)
+    if current_video_id is not None:
+        fields.append("current_video_id = ?")
+        values.append(current_video_id)
+    if detected_count is not None:
+        fields.append("detected_count = ?")
+        values.append(detected_count)
+    if output_path is not None:
+        fields.append("output_path = ?")
+        values.append(str(output_path))
+    if error is not None:
+        fields.append("error = ?")
+        values.append(error)
+    if ended:
+        fields.append("ended_at = ?")
+        values.append(utc_now())
+    values.append(run_id)
+    conn.execute(f"UPDATE runs SET {', '.join(fields)} WHERE run_id = ?", values)
+    conn.commit()
+
+
+def upsert_run_item(
+    conn: sqlite3.Connection,
+    run_id: str,
+    video: CreatorVideo,
+    status: str,
+    stage: str,
+    error: Optional[str] = None,
+    markdown_path: Optional[Path] = None,
+) -> None:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO run_items (
+            run_id, video_id, creator_key, creator_name, title, source_url,
+            status, stage, error, markdown_path, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, video_id) DO UPDATE SET
+            creator_key = excluded.creator_key,
+            creator_name = excluded.creator_name,
+            title = excluded.title,
+            source_url = excluded.source_url,
+            status = excluded.status,
+            stage = excluded.stage,
+            error = excluded.error,
+            markdown_path = excluded.markdown_path,
+            updated_at = excluded.updated_at
+        """,
+        (
+            run_id,
+            video.video_id,
+            video.creator_key,
+            video.creator_name,
+            video.title,
+            video.source_url,
+            status,
+            stage,
+            error,
+            str(markdown_path) if markdown_path else None,
+            now,
+        ),
+    )
+    conn.commit()
+    update_run_counts(conn, run_id)
 
 
 def get_status(conn: sqlite3.Connection, video_id: str) -> Optional[str]:
@@ -398,22 +615,26 @@ def transcribe_audio(audio_path: Path, cfg: Dict[str, Any]) -> str:
     except ImportError as exc:
         raise RuntimeError("faster-whisper is not installed. Run `bash local_tools/setup_obsidian_sync.sh`.") from exc
 
-    model = WhisperModel(
-        str(cfg.get("model", "small")),
-        device=str(cfg.get("device", "cpu")),
-        compute_type=str(cfg.get("compute_type", "int8")),
-    )
-    segments, _info = model.transcribe(
-        str(audio_path),
-        language=str(cfg.get("language", "zh")),
-        vad_filter=bool(cfg.get("vad_filter", True)),
-    )
+    model_name = str(cfg.get("model", "small"))
+    device = str(cfg.get("device", "cpu"))
+    compute_type = str(cfg.get("compute_type", "int8"))
+    cache_key = (model_name, device, compute_type)
+    with WHISPER_MODEL_LOCK:
+        model = WHISPER_MODEL_CACHE.get(cache_key)
+        if model is None:
+            model = WhisperModel(model_name, device=device, compute_type=compute_type)
+            WHISPER_MODEL_CACHE[cache_key] = model
+        segments, _info = model.transcribe(
+            str(audio_path),
+            language=str(cfg.get("language", "zh")),
+            vad_filter=bool(cfg.get("vad_filter", True)),
+        )
 
-    lines: List[str] = []
-    for segment in segments:
-        text = segment.text.strip()
-        if text:
-            lines.append(f"[{format_seconds(segment.start)} - {format_seconds(segment.end)}] {text}")
+        lines: List[str] = []
+        for segment in segments:
+            text = segment.text.strip()
+            if text:
+                lines.append(f"[{format_seconds(segment.start)} - {format_seconds(segment.end)}] {text}")
 
     transcript = "\n".join(lines).strip()
     if not transcript:
@@ -516,6 +737,15 @@ def atomic_write(path: Path, text: str) -> None:
     Path(temp_name).replace(path)
 
 
+def configured_concurrency(config: Dict[str, Any], cli_value: Optional[int]) -> int:
+    if cli_value:
+        value = int(cli_value)
+    else:
+        sync_cfg = config.get("sync") if isinstance(config.get("sync"), dict) else {}
+        value = int(sync_cfg.get("max_concurrency", 2))
+    return max(1, min(2, value))
+
+
 async def process_video(
     crawler: Any,
     conn: sqlite3.Connection,
@@ -524,7 +754,8 @@ async def process_video(
     output_base: Path,
     skip_summary: bool,
     no_cleanup: bool,
-) -> None:
+    run_id: Optional[str] = None,
+) -> str:
     work_dir = project_path(str(config.get("work_dir", "local_tools/obsidian_sync/work")))
     media_dir = work_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
@@ -533,32 +764,55 @@ async def process_video(
 
     try:
         print(f"PROCESS {video.creator_name} {video.video_id} {video.title}")
+        if run_id:
+            update_run(conn, run_id, current_stage="下载视频", current_creator=video.creator_name, current_video_id=video.video_id)
+            upsert_run_item(conn, run_id, video, "running", "下载视频")
         video_path = await download_video_to_temp(crawler, video, config.get("download", {}), media_dir)
+        if run_id:
+            update_run(conn, run_id, current_stage="提取音频", current_creator=video.creator_name, current_video_id=video.video_id)
+            upsert_run_item(conn, run_id, video, "running", "提取音频")
         audio_path = media_dir / f"{video.video_id}.wav"
-        extract_audio(video_path, audio_path)
-        transcript = transcribe_audio(audio_path, config.get("transcribe", {}))
+        await asyncio.to_thread(extract_audio, video_path, audio_path)
+        if run_id:
+            update_run(conn, run_id, current_stage="转录音频", current_creator=video.creator_name, current_video_id=video.video_id)
+            upsert_run_item(conn, run_id, video, "running", "转录音频")
+        transcript = await asyncio.to_thread(transcribe_audio, audio_path, config.get("transcribe", {}))
 
         if skip_summary:
             summary = "## 摘要\n\n未调用 AI 总结，本文件只包含逐字稿。"
             status = "ok"
         else:
             try:
-                summary = call_deepseek_summary(video, transcript, config.get("summary", {}))
+                if run_id:
+                    update_run(conn, run_id, current_stage="AI 总结", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "AI 总结")
+                summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, config.get("summary", {}))
                 status = "ok"
             except Exception as exc:  # noqa: BLE001 - keep transcript even if summary fails.
                 summary = f"## 摘要\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
                 status = "summary_error"
 
+        if run_id:
+            update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
+            upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
         markdown = build_markdown(video, summary, transcript, status)
         markdown_path = output_path_for_video(output_base, video)
         atomic_write(markdown_path, markdown)
         mark_result(conn, video, status, markdown_path, None if status == "ok" else "summary failed", len(transcript))
+        if run_id:
+            item_status = "success" if status == "ok" else "failed"
+            item_error = None if status == "ok" else "AI 总结失败，但逐字稿已写入 Markdown"
+            upsert_run_item(conn, run_id, video, item_status, "完成", item_error, markdown_path)
         print(f"WROTE {markdown_path}")
+        return status
 
     except Exception as exc:  # noqa: BLE001 - record failure and continue.
         message = f"{type(exc).__name__}: {exc}"
         mark_result(conn, video, "error", None, message, 0)
+        if run_id:
+            upsert_run_item(conn, run_id, video, "failed", "失败", message)
         print(f"ERROR {video.video_id} {message}")
+        return "error"
 
     finally:
         cleanup = bool(config.get("download", {}).get("cleanup_media", True)) and not no_cleanup
@@ -573,8 +827,7 @@ async def sync(args: argparse.Namespace) -> int:
     config = load_yaml(config_path)
     load_env_file(project_path(str(config.get("env_file", "local_tools/obsidian_sync/.env"))))
 
-    cookie_file = project_path(str(config.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
-    apply_runtime_cookies(read_secret_file(cookie_file), None)
+    apply_cookie_for_creator(config)
 
     from crawlers.hybrid.hybrid_crawler import HybridCrawler
 
@@ -582,6 +835,7 @@ async def sync(args: argparse.Namespace) -> int:
     state_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(state_path))
     ensure_state(conn)
+    run_id = str(args.run_id or default_run_id())
 
     vault_path = Path(str(config["vault_path"])).expanduser()
     output_base = vault_path / str(config.get("output_subdir", "Douyin/口播博主"))
@@ -593,59 +847,106 @@ async def sync(args: argparse.Namespace) -> int:
         print("No enabled creators. Edit local_tools/obsidian_sync/creators.yaml first.")
         return 0
 
+    start_run(conn, run_id, args.creator, len(creators))
+    print(f"RUN {run_id}")
+    max_concurrency = configured_concurrency(config, args.concurrency)
+    print(f"CONCURRENCY {max_concurrency}")
     crawler = HybridCrawler()
     total_seen = 0
     total_processed = 0
+    had_errors = False
 
-    total_creators = len(creators)
-    for creator_index, creator in enumerate(creators, start=1):
-        if not creator.get("key") or not creator.get("url"):
-            print(f"SKIP invalid creator entry: {creator}")
-            continue
-
-        creator_name = creator.get("name") or creator.get("key")
-        print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
-        print(f"FETCH {creator_name}")
-        videos = await fetch_creator_videos(crawler, creator, config.get("fetch", {}))
-        total_seen += len(videos)
-        print(f"FOUND {len(videos)} videos")
-
-        candidates: List[CreatorVideo] = []
-        for video in videos:
-            mark_seen(conn, video)
-            status = get_status(conn, video.video_id)
-            if status == "ok" and not args.force:
+    try:
+        total_creators = len(creators)
+        for creator_index, creator in enumerate(creators, start=1):
+            if not creator.get("key") or not creator.get("url"):
+                print(f"SKIP invalid creator entry: {creator}")
                 continue
-            candidates.append(video)
 
-        if args.limit:
-            candidates = candidates[: int(args.limit)]
+            creator_name = creator.get("name") or creator.get("key")
+            apply_cookie_for_creator(config, creator)
+            update_run(conn, run_id, current_stage="嗅探视频", current_creator=str(creator_name), current_video_id="")
+            print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
+            print(f"FETCH {creator_name}")
+            videos = await fetch_creator_videos(crawler, creator, config.get("fetch", {}))
+            total_seen += len(videos)
+            update_run(conn, run_id, detected_count=total_seen)
+            print(f"FOUND {len(videos)} videos")
 
-        print(f"CANDIDATES {creator.get('key')} count={len(candidates)}")
-        for video_index, video in enumerate(candidates, start=1):
+            candidates: List[CreatorVideo] = []
+            for video in videos:
+                mark_seen(conn, video)
+                status = get_status(conn, video.video_id)
+                if status == "ok" and not args.force:
+                    upsert_run_item(conn, run_id, video, "skipped", "已存在", "之前已成功处理，本轮跳过")
+                    continue
+                candidates.append(video)
+                upsert_run_item(conn, run_id, video, "pending", "等待处理")
+
+            if args.limit:
+                limited_ids = {video.video_id for video in candidates[: int(args.limit)]}
+                for video in candidates:
+                    if video.video_id not in limited_ids:
+                        upsert_run_item(conn, run_id, video, "skipped", "超出数量限制", "受本轮数量限制跳过")
+                candidates = candidates[: int(args.limit)]
+
+            print(f"CANDIDATES {creator.get('key')} count={len(candidates)}")
+
             if args.dry_run:
-                print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
-                print(f"DRY {video.creator_name} {video.video_id} {video.title} {video.source_url}")
+                for video_index, video in enumerate(candidates, start=1):
+                    update_run(conn, run_id, current_stage="处理视频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
+                    upsert_run_item(conn, run_id, video, "dry_run", "Dry run", "只演练，不下载和写入")
+                    print(f"DRY {video.creator_name} {video.video_id} {video.title} {video.source_url}")
                 continue
 
-            print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
-            await process_video(
-                crawler=crawler,
-                conn=conn,
-                video=video,
-                config=config,
-                output_base=output_base,
-                skip_summary=args.skip_summary,
-                no_cleanup=args.no_cleanup,
-            )
-            total_processed += 1
+            semaphore = asyncio.Semaphore(max_concurrency)
             delay = float(config.get("fetch", {}).get("delay_seconds", 2))
-            if delay > 0:
-                time.sleep(delay)
+            sync_cfg = config.get("sync") if isinstance(config.get("sync"), dict) else {}
+            stagger = float(sync_cfg.get("stagger_seconds", min(delay, 1.0)))
 
-    conn.close()
-    print(f"DONE seen={total_seen} processed={total_processed} output={output_base}")
-    return 0
+            async def run_candidate(video_index: int, video: CreatorVideo) -> str:
+                async with semaphore:
+                    update_run(
+                        conn,
+                        run_id,
+                        current_stage="处理视频",
+                        current_creator=video.creator_name,
+                        current_video_id=video.video_id,
+                    )
+                    print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
+                    return await process_video(
+                        crawler=crawler,
+                        conn=conn,
+                        video=video,
+                        config=config,
+                        output_base=output_base,
+                        skip_summary=args.skip_summary,
+                        no_cleanup=args.no_cleanup,
+                        run_id=run_id,
+                    )
+
+            tasks = []
+            for video_index, video in enumerate(candidates, start=1):
+                tasks.append(asyncio.create_task(run_candidate(video_index, video)))
+                if stagger > 0 and video_index < len(candidates):
+                    await asyncio.sleep(stagger)
+
+            for result_status in await asyncio.gather(*tasks):
+                if result_status != "ok":
+                    had_errors = True
+                total_processed += 1
+
+        update_run_counts(conn, run_id)
+        final_status = "done_with_errors" if had_errors else "done"
+        update_run(conn, run_id, status=final_status, current_stage="完成", output_path=output_base, ended=True)
+        print(f"DONE seen={total_seen} processed={total_processed} output={output_base}")
+        return 0
+    except Exception as exc:
+        update_run(conn, run_id, status="failed", current_stage="失败", error=f"{type(exc).__name__}: {exc}", ended=True)
+        raise
+    finally:
+        conn.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -657,6 +958,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force", action="store_true", help="Reprocess videos already marked ok.")
     parser.add_argument("--skip-summary", action="store_true", help="Write transcript-only notes without DeepSeek summary.")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep temporary video/audio files for debugging.")
+    parser.add_argument("--run-id", default=None, help="Stable run id for dashboard tracking.")
+    parser.add_argument("--concurrency", type=int, default=None, help="Parallel video pipelines per creator. Clamped to 1-2.")
     return parser.parse_args()
 
 

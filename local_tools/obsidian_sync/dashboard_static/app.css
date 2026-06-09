@@ -218,7 +218,7 @@ button:hover {
 
 .creator-row {
   display: grid;
-  grid-template-columns: 140px 160px minmax(220px, 1fr) 80px 150px 92px 72px;
+  grid-template-columns: 150px minmax(220px, 1.3fr) 120px 90px 110px 72px minmax(160px, 1fr) 92px 72px;
   gap: 8px;
   align-items: end;
   border: 1px solid #ecece7;
@@ -243,7 +243,7 @@ button:hover {
 
 .run-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 130px repeat(3, 120px);
+  grid-template-columns: minmax(220px, 1fr) 130px 120px;
   gap: 10px;
   align-items: end;
 }
@@ -303,36 +303,15 @@ button:hover {
   margin-top: 8px;
 }
 
-.log-summary {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-
-.log-summary > div,
 .history-item,
-.file-item {
+.archive-item {
   border: 1px solid #ecece7;
   border-radius: 8px;
   padding: 10px;
   background: #fbfbf8;
 }
 
-.log-summary strong {
-  display: block;
-  margin-bottom: 6px;
-}
-
-.log-summary ul {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.history-list,
-.file-list {
+.history-list {
   display: grid;
   gap: 8px;
 }
@@ -342,23 +321,154 @@ button:hover {
   gap: 6px;
 }
 
-.history-item > div {
+.history-title {
   display: flex;
   justify-content: space-between;
   gap: 10px;
+}
+
+.history-title > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.history-title span,
+.history-title time {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .history-item.done strong {
   color: var(--ok);
 }
 
+.history-item.done_with_errors strong,
+.history-item.running strong {
+  color: var(--warn);
+}
+
 .history-item.error strong,
+.history-item.failed strong,
+.history-item.stopped strong,
 .history-item.unknown strong {
   color: var(--bad);
 }
 
-.history-item.running strong {
+.history-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.history-metrics span {
+  display: grid;
+  gap: 2px;
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  padding: 8px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 12px;
+}
+
+.history-metrics b {
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.history-reasons {
+  display: grid;
+  gap: 6px;
+}
+
+.history-reasons em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.reason-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-items,
+.history-archive {
+  margin-top: 8px;
+}
+
+.run-items summary,
+.history-archive summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.item-table {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.run-item {
+  display: grid;
+  grid-template-columns: 70px minmax(220px, 1fr) 96px minmax(220px, 1.2fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.item-status {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.run-item.success .item-status {
+  color: var(--ok);
+}
+
+.run-item.failed .item-status {
+  color: var(--bad);
+}
+
+.run-item.running .item-status,
+.run-item.pending .item-status {
   color: var(--warn);
+}
+
+.item-title,
+.item-error {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archive-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.archive-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.archive-item span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .history-item p,
@@ -373,20 +483,6 @@ button:hover {
   color: var(--muted);
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.file-item {
-  display: flex;
-  width: 100%;
-  justify-content: space-between;
-  gap: 10px;
-  color: var(--text);
-  background: #fff;
-  text-align: left;
-}
-
-.file-item small {
-  color: var(--muted);
 }
 
 pre {
@@ -429,7 +525,12 @@ pre {
   .two-col,
   .run-grid,
   .creator-row,
-  .log-summary {
+  .history-metrics,
+  .run-item {
     grid-template-columns: 1fr;
+  }
+
+  .archive-item {
+    display: grid;
   }
 }

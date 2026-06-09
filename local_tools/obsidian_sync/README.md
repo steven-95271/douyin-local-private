@@ -45,15 +45,27 @@ local_tools/obsidian_sync/creators.yaml
 把 `creators` 里的示例改成真实博主：
 
 ```yaml
+sync:
+  max_concurrency: 2
+
+douyin_cookie_profiles:
+  default: local_tools/douyin_cookie.txt
+  spare: local_tools/douyin_cookie_spare.txt
+
 creators:
-  - key: someone
-    name: 某某博主
+  - name: 某某博主
     url: https://www.douyin.com/user/...
     enabled: true
+    category: 投资商业
+    language: 中文
+    content_type: 口播
+    cookie_profile: default
     tags:
       - douyin
       - 口播
 ```
+
+`key` 会在后台自动生成。`cookie_profile` 是可选项，用于多账号登录态管理；不配置时使用默认 Cookie。
 
 ## 运行
 
@@ -70,14 +82,15 @@ bash local_tools/start_obsidian_dashboard.sh
 http://127.0.0.1:8787
 ```
 
-页面里可以维护博主、保存 Cookie/API Key、启动 dry-run 或正式同步。
+页面里可以维护博主、保存 Cookie/API Key、启动同步任务。
 
-如果要一次性抓取某个博主的所有可扫描视频，在「同步任务」里先选择具体博主，再点「全量抓取该博主」。这个按钮会自动取消 Dry run、把数量限制设为 `0`，并跳过已经成功生成过 Markdown 的视频。
+如果要一次性抓取某个博主的所有可扫描视频，在「同步任务」里先选择具体博主，再点「全量抓取该博主」。这个按钮会把数量限制设为 `0`，并跳过已经成功生成过 Markdown 的视频。
 
-新增博主时可以只填「主页 URL」，再点「URL 补全」。工具会尝试读取抖音主页标题，自动生成：
+新增博主时可以只填「主页 URL」，再点「URL 补全」。工具会尝试读取抖音昵称、简介和最近视频标题，并自动生成：
 
-- `key`：本地唯一 ID，优先使用博主昵称的拼音首字母，例如 `波咕日记 -> bgrj`。
 - `name`：优先使用抖音接口返回的真实博主昵称，用于 Obsidian 文件夹和笔记 frontmatter。
+- `key`：后台唯一 ID，前端默认不展示。
+- `category` / `language` / `content_type` / `tags`：用于分类、标签和后续周报聚合。
 
 如果补全失败，先导入抖音 Cookie。没有登录态时，抖音主页通常不会稳定返回真实昵称。
 
