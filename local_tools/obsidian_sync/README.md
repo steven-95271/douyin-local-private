@@ -57,6 +57,23 @@ creators:
 
 ## 运行
 
+推荐使用本地 Dashboard：
+
+```bash
+cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
+bash local_tools/start_obsidian_dashboard.sh
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:8787
+```
+
+页面里可以维护博主、保存 Cookie/API Key、启动 dry-run 或正式同步。
+
+命令行也可以直接使用：
+
 先做 dry-run，只看会发现哪些视频：
 
 ```bash

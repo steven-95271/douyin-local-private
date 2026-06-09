@@ -1,0 +1,294 @@
+:root {
+  --bg: #f5f5f2;
+  --panel: #ffffff;
+  --text: #171717;
+  --muted: #666b73;
+  --line: #d9d9d2;
+  --accent: #111111;
+  --ok: #1f7a4d;
+  --warn: #a05a00;
+  --bad: #a12828;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--text);
+  background: var(--bg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: #eeeeea;
+  padding: 18px;
+}
+
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 28px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 6px;
+  color: #fff;
+  background: #111;
+  font-weight: 700;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+.brand h1 {
+  font-size: 15px;
+}
+
+.brand p,
+.topbar p,
+label,
+#logPath {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+nav {
+  display: grid;
+  gap: 6px;
+}
+
+nav a {
+  display: block;
+  padding: 9px 10px;
+  border-radius: 6px;
+  color: #222;
+  text-decoration: none;
+}
+
+nav a.active,
+nav a:hover {
+  background: #deded8;
+}
+
+main {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  padding: 20px;
+}
+
+.topbar,
+.panel-head,
+.panel-actions,
+.status-row {
+  display: flex;
+  align-items: center;
+}
+
+.topbar {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.topbar h2 {
+  font-size: 22px;
+}
+
+.status-row {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: #b9d8c8;
+}
+
+.badge.warn {
+  color: var(--warn);
+  border-color: #e0c697;
+}
+
+.badge.bad {
+  color: var(--bad);
+  border-color: #e0b5b5;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 16px;
+}
+
+.panel-head {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.panel h3 {
+  font-size: 16px;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #cfcfc8;
+  border-radius: 6px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 9px 12px;
+  color: #fff;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+button.secondary {
+  color: var(--accent);
+  background: #fff;
+}
+
+button:hover {
+  filter: brightness(0.92);
+}
+
+.creator-list {
+  display: grid;
+  gap: 10px;
+}
+
+.creator-row {
+  display: grid;
+  grid-template-columns: 120px 160px minmax(220px, 1fr) 80px 160px 72px;
+  gap: 8px;
+  align-items: end;
+  border: 1px solid #ecece7;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfbf8;
+}
+
+.check {
+  grid-template-columns: 16px 1fr;
+  align-items: center;
+}
+
+.check input {
+  width: 16px;
+}
+
+.check span {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.run-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 130px repeat(3, 120px);
+  gap: 10px;
+  align-items: end;
+}
+
+.panel-actions {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+pre {
+  min-height: 260px;
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid #d2d2cb;
+  border-radius: 8px;
+  padding: 12px;
+  background: #151515;
+  color: #eeeeea;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+#toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  display: none;
+  max-width: 420px;
+  border: 1px solid #cfcfc8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+@media (max-width: 980px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .two-col,
+  .run-grid,
+  .creator-row {
+    grid-template-columns: 1fr;
+  }
+}

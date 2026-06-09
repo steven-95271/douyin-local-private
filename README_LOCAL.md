@@ -193,6 +193,20 @@ cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api
 bash local_tools/setup_obsidian_sync.sh
 ```
 
+启动本地管理页面：
+
+```bash
+bash local_tools/start_obsidian_dashboard.sh
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:8787
+```
+
+以后新增博主、更新 Cookie、启动 dry-run/同步都可以在这个页面完成。
+
 编辑博主配置：
 
 ```text

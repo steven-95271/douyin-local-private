@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Douyin Obsidian Sync</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">D</div>
+          <div>
+            <h1>Douyin Sync</h1>
+            <p>Obsidian 知识库</p>
+          </div>
+        </div>
+        <nav>
+          <a href="#creators" class="active">博主</a>
+          <a href="#settings">设置</a>
+          <a href="#run">运行</a>
+          <a href="#logs">日志</a>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h2>本地同步面板</h2>
+            <p id="subtitle">127.0.0.1 本机运行</p>
+          </div>
+          <div class="status-row">
+            <span id="cookieBadge" class="badge">Cookie</span>
+            <span id="keyBadge" class="badge">DeepSeek</span>
+            <span id="workerBadge" class="badge">Idle</span>
+          </div>
+        </header>
+
+        <section id="creators" class="panel">
+          <div class="panel-head">
+            <h3>博主列表</h3>
+            <button id="addCreator" type="button">添加博主</button>
+          </div>
+          <div id="creatorList" class="creator-list"></div>
+          <div class="panel-actions">
+            <button id="saveCreators" type="button">保存博主配置</button>
+          </div>
+        </section>
+
+        <section id="settings" class="panel two-col">
+          <div>
+            <h3>输出设置</h3>
+            <label>Obsidian Vault
+              <input id="vaultPath" type="text">
+            </label>
+            <label>子目录
+              <input id="outputSubdir" type="text">
+            </label>
+            <button id="saveSettings" type="button">保存输出设置</button>
+          </div>
+          <div>
+            <h3>密钥</h3>
+            <label>抖音 Cookie
+              <textarea id="cookieInput" rows="4" placeholder="粘贴抖音网页版 Cookie"></textarea>
+            </label>
+            <label>DeepSeek API Key
+              <input id="apiKeyInput" type="password" placeholder="sk-...">
+            </label>
+            <button id="saveSecrets" type="button">保存密钥</button>
+          </div>
+        </section>
+
+        <section id="run" class="panel">
+          <div class="panel-head">
+            <h3>同步任务</h3>
+            <button id="refresh" type="button">刷新状态</button>
+          </div>
+          <div class="run-grid">
+            <label>指定博主
+              <select id="runCreator"></select>
+            </label>
+            <label>数量限制
+              <input id="runLimit" type="number" min="0" value="1">
+            </label>
+            <label class="check">
+              <input id="dryRun" type="checkbox" checked>
+              <span>Dry run</span>
+            </label>
+            <label class="check">
+              <input id="skipSummary" type="checkbox">
+              <span>跳过总结</span>
+            </label>
+            <label class="check">
+              <input id="forceRun" type="checkbox">
+              <span>重新处理</span>
+            </label>
+          </div>
+          <div class="panel-actions">
+            <button id="startRun" type="button">启动任务</button>
+            <button id="stopRun" type="button" class="secondary">停止任务</button>
+          </div>
+        </section>
+
+        <section id="logs" class="panel">
+          <div class="panel-head">
+            <h3>运行日志</h3>
+            <span id="logPath"></span>
+          </div>
+          <pre id="logText"></pre>
+        </section>
+      </main>
+    </div>
+    <div id="toast"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
