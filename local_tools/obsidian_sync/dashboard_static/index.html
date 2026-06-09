@@ -106,11 +106,22 @@
           </div>
           <div class="panel-actions">
             <button id="startRun" type="button">启动任务</button>
+            <button id="runAllCreators" type="button">串行跑所有启用博主</button>
             <button id="crawlCreatorAll" type="button">全量抓取该博主</button>
             <button id="stopRun" type="button" class="secondary">停止任务</button>
             <button id="notifyPermission" type="button" class="secondary">允许完成提醒</button>
             <button id="openOutput" type="button" class="secondary">打开输出目录</button>
             <button id="openLog" type="button" class="secondary">打开日志</button>
+          </div>
+          <div id="progressBox" class="progress-box">
+            <div class="progress-head">
+              <strong id="progressLabel">暂无进度</strong>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-track">
+              <div id="progressFill" class="progress-fill"></div>
+            </div>
+            <div id="progressMeta" class="progress-meta"></div>
           </div>
         </section>
 

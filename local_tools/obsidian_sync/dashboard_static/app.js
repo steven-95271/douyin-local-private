@@ -56,6 +56,7 @@ function renderLogs(worker) {
   $("logPath").textContent = worker.log_path || "";
   $("logText").textContent = worker.log_tail || "暂无日志";
   renderRunMeta(worker);
+  renderProgress(worker.progress || {});
 }
 
 function statusLabel(status) {
@@ -98,6 +99,31 @@ function renderRunMeta(worker) {
       <small>${escapeHtml(file.modified || "")}</small>
     </button>
   `).join("") : `<p class="empty">暂无 Markdown 文件</p>`;
+}
+
+function renderProgress(progress) {
+  const percent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+  $("progressLabel").textContent = progress.label || "暂无进度";
+  $("progressPercent").textContent = `${percent}%`;
+  $("progressFill").style.width = `${percent}%`;
+
+  const parts = [];
+  if (progress.total_creators) {
+    parts.push(`博主 ${progress.fetched_creators || 0}/${progress.total_creators}`);
+  }
+  if (progress.total_items !== null && progress.total_items !== undefined) {
+    parts.push(`视频 ${progress.completed_items || 0}/${progress.total_items}`);
+  }
+  if (progress.current_video) {
+    parts.push(`当前 ${progress.current_video}`);
+  }
+  if (progress.retry_count) {
+    parts.push(`自动重试 ${progress.retry_count} 次`);
+  }
+  if (progress.error_count) {
+    parts.push(`错误 ${progress.error_count}`);
+  }
+  $("progressMeta").textContent = parts.join(" · ") || "任务启动后会显示扫描、处理和重试进度";
 }
 
 function maybeNotify(worker) {
@@ -288,6 +314,15 @@ async function crawlSelectedCreatorAll() {
   await startRun();
 }
 
+async function runAllEnabledCreators() {
+  $("runCreator").value = "";
+  const limit = Number($("runLimit").value || 0);
+  const limitText = limit > 0 ? `每个博主最多处理 ${limit} 条` : "处理所有可扫描的新视频";
+  const confirmed = window.confirm(`将按博主列表顺序串行运行所有启用博主，${limitText}。已成功处理过的视频会自动跳过。继续吗？`);
+  if (!confirmed) return;
+  await startRun();
+}
+
 async function stopRun() {
   const result = await api("/api/run/stop", { method: "POST", body: "{}" });
   renderLogs(result.worker);
@@ -328,6 +363,7 @@ $("saveSettings").addEventListener("click", () => saveConfig(false).catch((error
 $("saveSecrets").addEventListener("click", () => saveSecrets().catch((error) => toast(error.message)));
 $("refresh").addEventListener("click", () => refreshStatus().catch((error) => toast(error.message)));
 $("startRun").addEventListener("click", () => startRun().catch((error) => toast(error.message)));
+$("runAllCreators").addEventListener("click", () => runAllEnabledCreators().catch((error) => toast(error.message)));
 $("crawlCreatorAll").addEventListener("click", () => crawlSelectedCreatorAll().catch((error) => toast(error.message)));
 $("stopRun").addEventListener("click", () => stopRun().catch((error) => toast(error.message)));
 $("notifyPermission").addEventListener("click", () => requestNotifyPermission().catch((error) => toast(error.message)));

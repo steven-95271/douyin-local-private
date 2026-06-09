@@ -456,6 +456,107 @@ def parse_run_history(text: str) -> list[Dict[str, Any]]:
     return runs[-12:]
 
 
+def latest_run_lines(text: str) -> list[str]:
+    lines = text.splitlines()
+    start_index = 0
+    for index, raw in enumerate(lines):
+        if re.match(r"^\[([^\]]+)\] START (.*)$", raw):
+            start_index = index
+    return lines[start_index:]
+
+
+def parse_progress(text: str, data: Dict[str, Any], running: bool) -> Dict[str, Any]:
+    lines = latest_run_lines(text)
+    enabled_creators = [creator for creator in data.get("creators", []) if creator.get("enabled", True)]
+    total_creators = len(enabled_creators)
+    current_creator = ""
+    current_video = ""
+    fetched_creators = 0
+    total_items = 0
+    has_candidate_total = False
+    completed_items = 0
+    found_items = 0
+    retry_count = 0
+    error_count = 0
+    last_progress = ""
+    has_structured_creator = False
+
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith("CREATOR "):
+            match = re.match(r"^CREATOR\s+(\d+)/(\d+)\s+(.+)$", line)
+            if match:
+                has_structured_creator = True
+                fetched_creators = max(fetched_creators, int(match.group(1)))
+                total_creators = max(total_creators, int(match.group(2)))
+                current_creator = match.group(3)
+        elif line.startswith("FETCH "):
+            if not has_structured_creator:
+                fetched_creators += 1
+            current_creator = line.replace("FETCH ", "", 1)
+        elif line.startswith("FOUND "):
+            match = re.search(r"FOUND\s+(\d+)", line)
+            if match:
+                found_items += int(match.group(1))
+        elif line.startswith("CANDIDATES "):
+            match = re.search(r"count=(\d+)", line)
+            if match:
+                total_items += int(match.group(1))
+                has_candidate_total = True
+        elif line.startswith("PROGRESS "):
+            last_progress = line.replace("PROGRESS ", "", 1)
+            parts = last_progress.split()
+            if len(parts) > 1:
+                current_video = parts[1]
+        elif line.startswith("PROCESS "):
+            parts = line.split()
+            if len(parts) >= 3:
+                current_video = parts[2]
+        elif line.startswith("WROTE ") or line.startswith("ERROR ") or line.startswith("DRY "):
+            completed_items += 1
+            if line.startswith("ERROR "):
+                error_count += 1
+        elif line.startswith("RETRY "):
+            retry_count += 1
+
+    if not has_candidate_total and found_items:
+        total_items = found_items
+
+    if has_candidate_total and total_items == 0:
+        percent = 100
+    elif total_items > 0:
+        percent = min(100, int((completed_items / total_items) * 100))
+    else:
+        percent = 0
+
+    if running:
+        if current_creator and total_items:
+            label = f"正在处理 {current_creator}：{completed_items}/{total_items}"
+        elif current_creator:
+            label = f"正在扫描 {current_creator}"
+        else:
+            label = "准备启动任务"
+    elif completed_items or total_items:
+        label = f"最近任务：{completed_items}/{total_items or '-'}"
+    else:
+        label = "暂无进度"
+
+    return {
+        "label": label,
+        "percent": percent,
+        "running": running,
+        "current_creator": current_creator,
+        "current_video": current_video,
+        "last_progress": last_progress,
+        "completed_items": completed_items,
+        "total_items": total_items if (has_candidate_total or found_items) else None,
+        "fetched_creators": fetched_creators,
+        "total_creators": total_creators,
+        "retry_count": retry_count,
+        "error_count": error_count,
+    }
+
+
 def recent_markdown_files(base_dir: Path) -> list[Dict[str, Any]]:
     if not base_dir.exists():
         return []
@@ -485,6 +586,7 @@ def worker_status() -> Dict[str, Any]:
         text = ""
     analysis = classify_log_lines(text)
     history = parse_run_history(text)
+    progress = parse_progress(text, data, running)
     if history and not running and history[-1]["status"] == "running":
         history[-1]["status"] = "unknown"
     output_base = output_base_path(data)
@@ -495,6 +597,7 @@ def worker_status() -> Dict[str, Any]:
         "log_path": str(worker_log) if worker_log else None,
         "log_tail": log_text,
         "analysis": analysis,
+        "progress": progress,
         "history": history,
         "output_path": str(output_base),
         "recent_files": recent_markdown_files(output_base),
@@ -572,6 +675,7 @@ def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     cmd = [
         sys.executable,
+        "-u",
         str(PROJECT_ROOT / "local_tools" / "obsidian_sync" / "sync.py"),
         "--config",
         str(get_config_path()),

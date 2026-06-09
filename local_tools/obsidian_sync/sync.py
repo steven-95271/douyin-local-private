@@ -597,12 +597,15 @@ async def sync(args: argparse.Namespace) -> int:
     total_seen = 0
     total_processed = 0
 
-    for creator in creators:
+    total_creators = len(creators)
+    for creator_index, creator in enumerate(creators, start=1):
         if not creator.get("key") or not creator.get("url"):
             print(f"SKIP invalid creator entry: {creator}")
             continue
 
-        print(f"FETCH {creator.get('name') or creator.get('key')}")
+        creator_name = creator.get("name") or creator.get("key")
+        print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
+        print(f"FETCH {creator_name}")
         videos = await fetch_creator_videos(crawler, creator, config.get("fetch", {}))
         total_seen += len(videos)
         print(f"FOUND {len(videos)} videos")
@@ -618,11 +621,14 @@ async def sync(args: argparse.Namespace) -> int:
         if args.limit:
             candidates = candidates[: int(args.limit)]
 
-        for video in candidates:
+        print(f"CANDIDATES {creator.get('key')} count={len(candidates)}")
+        for video_index, video in enumerate(candidates, start=1):
             if args.dry_run:
+                print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
                 print(f"DRY {video.creator_name} {video.video_id} {video.title} {video.source_url}")
                 continue
 
+            print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
             await process_video(
                 crawler=crawler,
                 conn=conn,
