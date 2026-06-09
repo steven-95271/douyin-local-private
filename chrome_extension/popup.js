@@ -115,11 +115,28 @@ function getCookiesForUrl(url) {
   });
 }
 
+function getCookiesForDomain(domain) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.getAll({ domain }, (cookies) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(cookies || []);
+    });
+  });
+}
+
 async function getDouyinCookies() {
   const batches = await Promise.all([
     getCookiesForUrl("https://www.douyin.com/"),
     getCookiesForUrl("https://douyin.com/"),
     getCookiesForUrl("https://www.douyin.com/user/"),
+    getCookiesForUrl("https://sso.douyin.com/"),
+    getCookiesForUrl("https://passport.douyin.com/"),
+    getCookiesForDomain(".douyin.com"),
+    getCookiesForDomain("douyin.com"),
   ]);
   const byName = new Map();
   for (const cookie of batches.flat()) {
@@ -132,7 +149,8 @@ async function getDouyinCookies() {
   return {
     header: cookies.join("; "),
     count: cookies.length,
-    hasLogin: byName.has("sessionid") || byName.has("sessionid_ss") || byName.has("sid_guard"),
+    names: Array.from(byName.keys()).sort(),
+    hasLogin: byName.has("sessionid") || byName.has("sessionid_ss") || byName.has("sid_guard") || byName.has("passport_csrf_token"),
   };
 }
 
@@ -153,7 +171,8 @@ async function importCookieToDashboard() {
   if (!response.ok) {
     throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
   }
-  setStatus(`抖音 Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}`);
+  const names = cookie.names.slice(0, 8).join(", ");
+  setStatus(`抖音 Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}。${names}`);
 }
 
 function openDashboard() {

@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Douyin Local Collector",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Collect loaded Douyin video URLs and send them to the local private downloader.",
   "permissions": ["activeTab", "storage", "downloads", "cookies"],
   "host_permissions": [
+    "https://douyin.com/*",
+    "https://*.douyin.com/*",
     "https://www.douyin.com/*",
     "https://v.douyin.com/*",
     "http://127.0.0.1:8765/*",

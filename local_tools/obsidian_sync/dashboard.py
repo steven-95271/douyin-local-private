@@ -84,7 +84,10 @@ def cookie_status(path: Path) -> Dict[str, Any]:
         status["login_ready"] = False
         return status
     text = path.read_text(encoding="utf-8").strip()
-    has_login = any(marker in text for marker in ["sessionid=", "sessionid_ss=", "sid_guard="])
+    has_login = any(
+        marker in text
+        for marker in ["sessionid=", "sessionid_ss=", "sid_guard=", "passport_csrf_token="]
+    )
     status["login_ready"] = has_login
     status["ready"] = has_login
     return status
