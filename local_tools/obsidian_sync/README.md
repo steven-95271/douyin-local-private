@@ -116,4 +116,30 @@ DeepSeek API Key 保存过一次后会一直沿用；后续留空保存不会覆
 
 ## 定时同步
 
-先手动跑通几次，再配置 `launchd`。第一版先保留手动运行，避免 Cookie 失效、转录模型下载、API 额度等问题混在后台排查。
+周度同步脚本会先同步所有启用博主的新视频，再生成过去 7 天的周报，并调用 Hermes 发送 Telegram 精简版。
+
+手动测试周报，不发送 Hermes：
+
+```bash
+cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
+.venv/bin/python local_tools/obsidian_sync/weekly_brief.py --no-hermes
+```
+
+安装每周一 11:00 自动运行：
+
+```bash
+cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
+bash local_tools/install_weekly_launchd.sh
+```
+
+周报默认输出：
+
+```text
+/Users/steven/Documents/Obsidian/MyVault/Douyin/周报
+```
+
+自动任务日志：
+
+```text
+local_tools/obsidian_sync/work/logs/weekly_sync.log
+```
