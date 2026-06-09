@@ -41,10 +41,16 @@
         <section id="creators" class="panel">
           <div class="panel-head">
             <div>
-              <h3>博主列表</h3>
-              <p>先导入抖音 Cookie，再用主页 URL 补全昵称和拼音 Key。</p>
+              <h3>博主库</h3>
+              <p>已启用博主默认折叠显示；新增或编辑时展开对应卡片。</p>
             </div>
             <button id="addCreator" type="button">添加博主</button>
+          </div>
+          <div class="creator-toolbar">
+            <label>搜索博主
+              <input id="creatorSearch" type="search" placeholder="按名称、分类、标签或 URL 搜索">
+            </label>
+            <span id="creatorCount" class="badge">0 个博主</span>
           </div>
           <div id="creatorList" class="creator-list"></div>
           <div class="panel-actions">
@@ -87,9 +93,6 @@
           <div class="run-grid">
             <label>指定博主
               <select id="runCreator"></select>
-            </label>
-            <label>数量限制
-              <input id="runLimit" type="number" min="0" value="1">
             </label>
             <label class="check">
               <input id="forceRun" type="checkbox">

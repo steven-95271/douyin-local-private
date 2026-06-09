@@ -216,15 +216,53 @@ button:hover {
   gap: 10px;
 }
 
+.creator-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
 .creator-row {
+  border: 1px solid #ecece7;
+  border-radius: 8px;
+  background: #fbfbf8;
+}
+
+.creator-row[hidden] {
+  display: none;
+}
+
+.creator-summary {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.2fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.creator-summary span:first-child {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.creator-summary [data-summary="meta"] {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creator-fields {
   display: grid;
   grid-template-columns: 150px minmax(220px, 1.3fr) 120px 90px 110px 72px minmax(160px, 1fr) 92px 72px;
   gap: 8px;
   align-items: end;
-  border: 1px solid #ecece7;
-  border-radius: 8px;
+  border-top: 1px solid #ecece7;
   padding: 10px;
-  background: #fbfbf8;
 }
 
 .check {
@@ -243,7 +281,7 @@ button:hover {
 
 .run-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 130px 120px;
+  grid-template-columns: minmax(220px, 1fr) 120px;
   gap: 10px;
   align-items: end;
 }
@@ -524,7 +562,9 @@ pre {
 
   .two-col,
   .run-grid,
-  .creator-row,
+  .creator-toolbar,
+  .creator-summary,
+  .creator-fields,
   .history-metrics,
   .run-item {
     grid-template-columns: 1fr;

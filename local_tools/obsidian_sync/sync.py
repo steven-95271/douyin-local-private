@@ -423,6 +423,28 @@ def safe_filename(text: str, limit: int = 96) -> str:
     return (text or "untitled")[:limit].rstrip(". ")
 
 
+def short_title_for_filename(text: str, default: str, limit: int = 32) -> str:
+    text = re.sub(r"#\S+", "", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    episode = ""
+    episode_match = re.match(r"^(第?\s*\d+\s*[集期讲节])\s*[:：.\-、]?\s*(.*)$", text)
+    if episode_match:
+        episode = re.sub(r"\s+", "", episode_match.group(1))
+        text = episode_match.group(2).strip()
+    for separator in ["：", ":", "。", "！", "？", "；", ";", "，", ","]:
+        if separator in text:
+            head = text.split(separator, 1)[0].strip()
+            if len(head) >= 4:
+                text = head
+                break
+    text = text.strip(" “”，,。.：:；;！!?？-—_")
+    if episode and text:
+        text = f"{episode}-{text}"
+    elif episode:
+        text = episode
+    return (text or default)[:limit].rstrip(" -_")
+
+
 def compact_title(text: str, default: str) -> str:
     text = re.sub(r"#\S+", "", text or "")
     text = re.sub(r"\s+", " ", text).strip()
@@ -723,10 +745,25 @@ def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: s
     )
 
 
-def output_path_for_video(base_dir: Path, video: CreatorVideo) -> Path:
+def output_path_for_video(base_dir: Path, video: CreatorVideo, conn: Optional[sqlite3.Connection] = None) -> Path:
     date_prefix = format_date(video.create_time)
-    filename = safe_filename(f"{video.title}-{video.creator_name}-{date_prefix}-{video.video_id}") + ".md"
-    return base_dir / safe_filename(video.creator_name, 40) / filename
+    title = short_title_for_filename(video.title, video.video_id)
+    directory = base_dir / safe_filename(video.creator_name, 40)
+    stem = safe_filename(f"{title}-{video.creator_name}-{date_prefix}", 120)
+    candidate = directory / f"{stem}.md"
+    if conn is None:
+        return candidate
+
+    current_row = conn.execute("SELECT markdown_path FROM videos WHERE video_id = ?", (video.video_id,)).fetchone()
+    current_path = Path(str(current_row[0])) if current_row and current_row[0] else None
+    if not candidate.exists() or (current_path and candidate == current_path):
+        return candidate
+
+    for index in range(2, 100):
+        fallback = directory / f"{stem}-{index}.md"
+        if not fallback.exists() or (current_path and fallback == current_path):
+            return fallback
+    return directory / f"{stem}-{video.video_id[-6:]}.md"
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -796,7 +833,7 @@ async def process_video(
             update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
             upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
         markdown = build_markdown(video, summary, transcript, status)
-        markdown_path = output_path_for_video(output_base, video)
+        markdown_path = output_path_for_video(output_base, video, conn)
         atomic_write(markdown_path, markdown)
         mark_result(conn, video, status, markdown_path, None if status == "ok" else "summary failed", len(transcript))
         if run_id:

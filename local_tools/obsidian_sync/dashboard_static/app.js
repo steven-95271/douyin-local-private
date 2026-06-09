@@ -205,9 +205,16 @@ function maybeNotify(worker) {
 }
 
 function creatorTemplate(creator = {}) {
-  const row = document.createElement("div");
+  const row = document.createElement("details");
   row.className = "creator-row";
+  row.open = !creator.name || !creator.url || creator.enabled === false;
   row.innerHTML = `
+    <summary class="creator-summary">
+      <span data-summary="name">${escapeHtml(creator.name || "未命名博主")}</span>
+      <span data-summary="meta">${escapeHtml(creator.category || "未分类")} · ${escapeHtml(creator.language || "中文")} · ${escapeHtml(creator.content_type || "口播")}</span>
+      <span data-summary="status" class="badge ${creator.enabled === false ? "" : "ok"}">${creator.enabled === false ? "停用" : "启用"}</span>
+    </summary>
+    <div class="creator-fields">
     <input data-field="sec_user_id" type="hidden" value="${escapeHtml(creator.sec_user_id || "")}">
     <input data-field="key" type="hidden" value="${escapeHtml(creator.key || "")}">
     <input data-field="bio" type="hidden" value="${escapeHtml(creator.bio || "")}">
@@ -220,9 +227,16 @@ function creatorTemplate(creator = {}) {
     <label>标签<input data-field="tags" value="${escapeHtml((creator.tags || ["douyin", "口播"]).join(", "))}"></label>
     <button type="button" class="secondary" data-action="resolve">URL 补全</button>
     <button type="button" class="secondary" data-action="remove">删除</button>
+    </div>
   `;
-  row.querySelector('[data-action="remove"]').addEventListener("click", () => row.remove());
+  row.querySelector('[data-action="remove"]').addEventListener("click", () => {
+    row.remove();
+    renderCreatorSelect();
+    applyCreatorFilter();
+  });
   row.querySelector('[data-action="resolve"]').addEventListener("click", () => resolveCreator(row).catch((error) => toast(error.message)));
+  row.addEventListener("input", () => updateCreatorSummary(row));
+  row.addEventListener("change", () => updateCreatorSummary(row));
   return row;
 }
 
@@ -244,6 +258,45 @@ function renderConfig(config) {
     list.appendChild(creatorTemplate(creator));
   }
   renderCreatorSelect();
+  applyCreatorFilter();
+}
+
+function updateCreatorSummary(row) {
+  const name = row.querySelector('[data-field="name"]').value.trim() || "未命名博主";
+  const category = row.querySelector('[data-field="category"]').value.trim() || "未分类";
+  const language = row.querySelector('[data-field="language"]').value.trim() || "中文";
+  const contentType = row.querySelector('[data-field="content_type"]').value.trim() || "口播";
+  const enabled = row.querySelector('[data-field="enabled"]').checked;
+  row.querySelector('[data-summary="name"]').textContent = name;
+  row.querySelector('[data-summary="meta"]').textContent = `${category} · ${language} · ${contentType}`;
+  const status = row.querySelector('[data-summary="status"]');
+  status.textContent = enabled ? "启用" : "停用";
+  status.className = `badge ${enabled ? "ok" : ""}`.trim();
+}
+
+function creatorSearchText(row) {
+  return [
+    row.querySelector('[data-field="name"]').value,
+    row.querySelector('[data-field="url"]').value,
+    row.querySelector('[data-field="category"]').value,
+    row.querySelector('[data-field="language"]').value,
+    row.querySelector('[data-field="content_type"]').value,
+    row.querySelector('[data-field="tags"]').value,
+  ].join(" ").toLowerCase();
+}
+
+function applyCreatorFilter() {
+  const input = $("creatorSearch");
+  const query = input ? input.value.trim().toLowerCase() : "";
+  const rows = Array.from(document.querySelectorAll(".creator-row"));
+  let visible = 0;
+  for (const row of rows) {
+    const matched = !query || creatorSearchText(row).includes(query);
+    row.hidden = !matched;
+    if (matched) visible += 1;
+  }
+  const enabled = rows.filter((row) => row.querySelector('[data-field="enabled"]').checked).length;
+  $("creatorCount").textContent = `${visible}/${rows.length} 个博主 · 启用 ${enabled}`;
 }
 
 function readCreators() {
@@ -275,7 +328,7 @@ function renderCreatorSelect() {
   for (const creator of creators) {
     const option = document.createElement("option");
     option.value = creator.key;
-    option.textContent = `${creator.name} (${creator.key})`;
+    option.textContent = creator.category ? `${creator.name} · ${creator.category}` : creator.name;
     select.appendChild(option);
   }
   if (current) select.value = current;
@@ -305,7 +358,9 @@ async function resolveCreator(row) {
     row.querySelector('[data-field="content_type"]').value = result.creator.content_type || "";
     row.querySelector('[data-field="enabled"]').checked = result.creator.enabled !== false;
     row.querySelector('[data-field="tags"]').value = (result.creator.tags || ["douyin", "口播"]).join(", ");
+    updateCreatorSummary(row);
     renderCreatorSelect();
+    applyCreatorFilter();
     toast("博主信息已补全");
   } finally {
     button.disabled = false;
@@ -360,7 +415,6 @@ async function startRun() {
   await saveConfig(true);
   const payload = {
     creator: $("runCreator").value,
-    limit: Number($("runLimit").value || 0),
     force: $("forceRun").checked,
   };
   const result = await api("/api/run", {
@@ -377,7 +431,6 @@ async function crawlSelectedCreatorAll() {
   if (!creator) {
     throw new Error("请先在“指定博主”里选择一个博主");
   }
-  $("runLimit").value = "0";
   const creatorLabel = $("runCreator").selectedOptions[0]?.textContent || creator;
   const confirmed = window.confirm(`将正式抓取 ${creatorLabel} 的所有可扫描视频，并生成 Markdown。已成功处理过的视频会自动跳过。继续吗？`);
   if (!confirmed) return;
@@ -386,9 +439,7 @@ async function crawlSelectedCreatorAll() {
 
 async function runAllEnabledCreators() {
   $("runCreator").value = "";
-  const limit = Number($("runLimit").value || 0);
-  const limitText = limit > 0 ? `每个博主最多处理 ${limit} 条` : "处理所有可扫描的新视频";
-  const confirmed = window.confirm(`将按博主列表顺序串行运行所有启用博主，${limitText}。已成功处理过的视频会自动跳过。继续吗？`);
+  const confirmed = window.confirm("将按博主库顺序串行运行所有启用博主，处理所有可扫描的新视频。已成功处理过的视频会自动跳过。继续吗？");
   if (!confirmed) return;
   await startRun();
 }
@@ -430,6 +481,7 @@ $("addCreator").addEventListener("click", () => {
     tags: ["douyin", "口播"],
   }));
   renderCreatorSelect();
+  applyCreatorFilter();
 });
 
 $("saveCreators").addEventListener("click", () => saveConfig(true).catch((error) => toast(error.message)));
@@ -443,7 +495,15 @@ $("stopRun").addEventListener("click", () => stopRun().catch((error) => toast(er
 $("notifyPermission").addEventListener("click", () => requestNotifyPermission().catch((error) => toast(error.message)));
 $("openOutput").addEventListener("click", () => openTarget("output").catch((error) => toast(error.message)));
 $("openLog").addEventListener("click", () => openTarget("log").catch((error) => toast(error.message)));
-$("creatorList").addEventListener("input", renderCreatorSelect);
+$("creatorList").addEventListener("input", () => {
+  renderCreatorSelect();
+  applyCreatorFilter();
+});
+$("creatorList").addEventListener("change", () => {
+  renderCreatorSelect();
+  applyCreatorFilter();
+});
+$("creatorSearch").addEventListener("input", applyCreatorFilter);
 
 loadAll().catch((error) => toast(error.message));
 state.statusTimer = setInterval(() => {
