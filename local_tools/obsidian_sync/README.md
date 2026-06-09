@@ -74,13 +74,15 @@ http://127.0.0.1:8787
 
 新增博主时可以只填「主页 URL」，再点「URL 补全」。工具会尝试读取抖音主页标题，自动生成：
 
-- `key`：本地唯一 ID，基于主页 URL 稳定生成。
-- `name`：用于 Obsidian 文件夹和笔记 frontmatter 的博主名称。
+- `key`：本地唯一 ID，优先使用博主昵称的拼音首字母，例如 `波咕日记 -> bgrj`。
+- `name`：优先使用抖音接口返回的真实博主昵称，用于 Obsidian 文件夹和笔记 frontmatter。
+
+如果补全失败，先导入抖音 Cookie。没有登录态时，抖音主页通常不会稳定返回真实昵称。
 
 Cookie 可以手动粘贴，也可以通过 Chrome 插件导入。插件导入方式：
 
 1. Chrome 登录 `https://www.douyin.com`。
-2. 打开 `chrome://extensions/`，重新加载本项目的插件。
+2. 打开 `chrome://extensions/`，加载或重新加载本项目的插件目录：`/Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private/chrome_extension`。
 3. 点击插件图标。
 4. 点击「导入抖音 Cookie」。
 

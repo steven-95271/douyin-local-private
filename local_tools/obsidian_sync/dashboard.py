@@ -8,7 +8,7 @@ The server binds to 127.0.0.1 by default and never returns secret values.
 from __future__ import annotations
 
 import argparse
-import hashlib
+import asyncio
 import html
 import json
 import os
@@ -108,11 +108,37 @@ def update_env_value(env_path: Path, key: str, value: str) -> None:
     env_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 
 
-def safe_key_part(value: str) -> str:
+def normalize_key(value: str) -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9]+", "_", value)
     value = re.sub(r"_+", "_", value).strip("_")
-    return value[:36]
+    return value[:40]
+
+
+def pinyin_initials(value: str) -> str:
+    try:
+        from pypinyin import Style, lazy_pinyin
+    except ImportError as exc:
+        raise RuntimeError("缺少 pypinyin，请先运行 bash local_tools/setup_obsidian_sync.sh") from exc
+
+    parts = lazy_pinyin(value, style=Style.FIRST_LETTER, errors="ignore")
+    key = normalize_key("".join(parts))
+    return key or normalize_key(value)
+
+
+def unique_creator_key(base_key: str, url: str, data: Dict[str, Any]) -> str:
+    creators = data.get("creators") or []
+    used = {
+        str(item.get("key", "")).strip(): str(item.get("url", "")).strip()
+        for item in creators
+        if isinstance(item, dict)
+    }
+    if base_key not in used or used[base_key] == url:
+        return base_key
+    index = 2
+    while f"{base_key}_{index}" in used and used[f"{base_key}_{index}"] != url:
+        index += 1
+    return f"{base_key}_{index}"
 
 
 def clean_creator_name(value: str) -> str:
@@ -144,6 +170,55 @@ def extract_meta(html_text: str, name: str) -> str:
     return ""
 
 
+def extract_author_name_from_item(item: Dict[str, Any]) -> str:
+    author = item.get("author") or item.get("author_user_info") or item.get("user") or {}
+    if isinstance(author, dict):
+        for key in ("nickname", "name", "unique_id", "short_id"):
+            value = str(author.get(key, "")).strip()
+            if value:
+                return clean_creator_name(value)
+    return ""
+
+
+def extract_name_from_html(html_text: str) -> str:
+    candidates = [
+        extract_meta(html_text, "og:title"),
+        extract_meta(html_text, "twitter:title"),
+    ]
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
+    if title_match:
+        candidates.append(title_match.group(1))
+    for pattern in (
+        r'"nickname"\s*:\s*"([^"]+)"',
+        r'"name"\s*:\s*"([^"]+)"',
+        r'"user_name"\s*:\s*"([^"]+)"',
+    ):
+        match = re.search(pattern, html_text)
+        if match:
+            candidates.append(match.group(1))
+    for candidate in candidates:
+        name = clean_creator_name(candidate)
+        if name and name not in {"抖音", "douyin", "douyin_creator"}:
+            return name
+    return ""
+
+
+async def fetch_douyin_creator_profile(url: str, cookie: str) -> Dict[str, Any]:
+    from crawlers.douyin.web.web_crawler import DouyinWebCrawler
+    from local_tools.batch_download import apply_runtime_cookies
+
+    apply_runtime_cookies(cookie or None, None)
+    crawler = DouyinWebCrawler()
+    sec_user_id = await crawler.get_sec_user_id(url)
+    response = await crawler.fetch_user_post_videos(str(sec_user_id), 0, 1)
+    data = response.get("data") if isinstance(response.get("data"), dict) else response
+    items = data.get("aweme_list") or data.get("aweme_list_v2") or data.get("items") or []
+    name = ""
+    if items and isinstance(items[0], dict):
+        name = extract_author_name_from_item(items[0])
+    return {"sec_user_id": sec_user_id, "name": name}
+
+
 def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_url = str(payload.get("url", "")).strip()
     if not raw_url:
@@ -156,6 +231,12 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = load_config()
     cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
     cookie = cookie_file.read_text(encoding="utf-8").strip() if cookie_file.exists() else ""
+    profile: Dict[str, Any] = {}
+    try:
+        profile = asyncio.run(fetch_douyin_creator_profile(url, cookie))
+    except Exception:
+        profile = {}
+
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -166,35 +247,30 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     if cookie:
         headers["Cookie"] = cookie
 
-    request = Request(url, headers=headers)
-    with urlopen(request, timeout=15) as response:
-        final_url = response.geturl()
-        html_text = response.read(2_000_000).decode("utf-8", errors="replace")
+    final_url = url
+    html_text = ""
+    try:
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=15) as response:
+            final_url = response.geturl()
+            html_text = response.read(2_000_000).decode("utf-8", errors="replace")
+    except Exception:
+        final_url = url
 
-    name = (
-        clean_creator_name(extract_meta(html_text, "og:title"))
-        or clean_creator_name(extract_meta(html_text, "twitter:title"))
-    )
+    name = clean_creator_name(str(profile.get("name", ""))) or extract_name_from_html(html_text)
     if not name:
-        title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
-        if title_match:
-            name = clean_creator_name(title_match.group(1))
-    if not name:
-        name = "douyin_creator"
+        raise ValueError("没有获取到博主昵称。请先用 Chrome 插件导入抖音 Cookie，再点 URL 补全。")
 
-    user_match = re.search(r"/user/([^/?#]+)", final_url) or re.search(r"/user/([^/?#]+)", url)
-    user_id = user_match.group(1) if user_match else ""
-    key_source = user_id or final_url or url
-    key_slug = safe_key_part(name)
-    if not key_slug or key_slug == "douyin_creator":
-        key_slug = "douyin"
-    digest = hashlib.sha1(key_source.encode("utf-8")).hexdigest()[:10]
-    key = f"{key_slug}_{digest}"
+    key = pinyin_initials(name)
+    if not key:
+        raise ValueError(f"无法根据博主名称生成 Key: {name}")
+    key = unique_creator_key(key, final_url, data)
 
     return {
         "key": key,
         "name": name,
         "url": final_url,
+        "sec_user_id": profile.get("sec_user_id", ""),
         "enabled": True,
         "tags": ["douyin", "口播"],
     }
@@ -265,13 +341,17 @@ def normalize_creator(raw: Dict[str, Any]) -> Dict[str, Any]:
         tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
     if not isinstance(tags, list):
         tags = ["douyin", "口播"]
-    return {
+    creator = {
         "key": key,
         "name": name,
         "url": url,
         "enabled": bool(raw.get("enabled", True)),
         "tags": [str(tag) for tag in tags],
     }
+    sec_user_id = str(raw.get("sec_user_id", "")).strip()
+    if sec_user_id:
+        creator["sec_user_id"] = sec_user_id
+    return creator
 
 
 def save_public_config(payload: Dict[str, Any]) -> Dict[str, Any]:

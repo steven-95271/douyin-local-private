@@ -58,6 +58,7 @@ function creatorTemplate(creator = {}) {
   const row = document.createElement("div");
   row.className = "creator-row";
   row.innerHTML = `
+    <input data-field="sec_user_id" type="hidden" value="${escapeHtml(creator.sec_user_id || "")}">
     <label>Key<input data-field="key" value="${escapeHtml(creator.key || "")}"></label>
     <label>名称<input data-field="name" value="${escapeHtml(creator.name || "")}"></label>
     <label>主页 URL<input data-field="url" value="${escapeHtml(creator.url || "")}"></label>
@@ -101,6 +102,7 @@ function readCreators() {
       key: row.querySelector('[data-field="key"]').value.trim(),
       name: row.querySelector('[data-field="name"]').value.trim(),
       url: row.querySelector('[data-field="url"]').value.trim(),
+      sec_user_id: row.querySelector('[data-field="sec_user_id"]').value.trim(),
       enabled: row.querySelector('[data-field="enabled"]').checked,
       tags: tags.length ? tags : ["douyin", "口播"],
     };
@@ -138,6 +140,7 @@ async function resolveCreator(row) {
     row.querySelector('[data-field="key"]').value = result.creator.key || "";
     row.querySelector('[data-field="name"]').value = result.creator.name || "";
     row.querySelector('[data-field="url"]').value = result.creator.url || url;
+    row.querySelector('[data-field="sec_user_id"]').value = result.creator.sec_user_id || "";
     row.querySelector('[data-field="enabled"]').checked = result.creator.enabled !== false;
     row.querySelector('[data-field="tags"]').value = (result.creator.tags || ["douyin", "口播"]).join(", ");
     renderCreatorSelect();

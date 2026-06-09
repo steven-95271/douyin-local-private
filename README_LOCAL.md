@@ -212,7 +212,7 @@ bash local_tools/start_obsidian_dashboard.sh
 http://127.0.0.1:8787
 ```
 
-以后新增博主、更新 Cookie、启动 dry-run/同步都可以在这个页面完成。新增博主时可以只填主页 URL，再点「URL 补全」自动生成 Key 和名称。
+以后新增博主、更新 Cookie、启动 dry-run/同步都可以在这个页面完成。新增博主时可以只填主页 URL，再点「URL 补全」自动生成 Key 和名称。Key 会优先使用博主名称的拼音首字母，例如 `波咕日记 -> bgrj`。
 
 编辑博主配置：
 
