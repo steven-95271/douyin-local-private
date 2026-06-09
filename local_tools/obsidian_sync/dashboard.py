@@ -78,6 +78,18 @@ def file_ready(path: Path, placeholder_markers: list[str]) -> Dict[str, Any]:
     return {"exists": True, "ready": ready, "bytes": len(text.encode("utf-8"))}
 
 
+def cookie_status(path: Path) -> Dict[str, Any]:
+    status = file_ready(path, ["paste_your", "PASTE_YOUR"])
+    if not status["ready"]:
+        status["login_ready"] = False
+        return status
+    text = path.read_text(encoding="utf-8").strip()
+    has_login = any(marker in text for marker in ["sessionid=", "sessionid_ss=", "sid_guard="])
+    status["login_ready"] = has_login
+    status["ready"] = has_login
+    return status
+
+
 def env_status(env_path: Path, key: str) -> Dict[str, Any]:
     if not env_path.exists():
         return {"exists": False, "ready": False}
@@ -301,7 +313,7 @@ def status_payload() -> Dict[str, Any]:
     return {
         "time": utc_now(),
         "config_path": str(get_config_path()),
-        "cookie": file_ready(cookie_file, ["paste_your", "PASTE_YOUR"]),
+        "cookie": cookie_status(cookie_file),
         "deepseek": env_status(env_file, api_key_env),
         "vault": {"path": str(vault_path), "exists": vault_path.exists()},
         "output": {"path": str(output_dir), "exists": output_dir.exists()},

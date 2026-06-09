@@ -102,31 +102,44 @@ function exportTxt() {
   });
 }
 
-function getDouyinCookies() {
+function getCookiesForUrl(url) {
   return new Promise((resolve, reject) => {
-    chrome.cookies.getAll({ domain: ".douyin.com" }, (cookies) => {
+    chrome.cookies.getAll({ url }, (cookies) => {
       const error = chrome.runtime.lastError;
       if (error) {
         reject(new Error(error.message));
         return;
       }
-      const header = cookies
-        .filter((cookie) => cookie.name && cookie.value)
-        .sort((a, b) => {
-          if (a.domain !== b.domain) return a.domain.localeCompare(b.domain);
-          return b.path.length - a.path.length || a.name.localeCompare(b.name);
-        })
-        .map((cookie) => `${cookie.name}=${cookie.value}`)
-        .join("; ");
-      resolve(header);
+      resolve(cookies || []);
     });
   });
+}
+
+async function getDouyinCookies() {
+  const batches = await Promise.all([
+    getCookiesForUrl("https://www.douyin.com/"),
+    getCookiesForUrl("https://douyin.com/"),
+    getCookiesForUrl("https://www.douyin.com/user/"),
+  ]);
+  const byName = new Map();
+  for (const cookie of batches.flat()) {
+    if (!cookie.name || !cookie.value) continue;
+    byName.set(cookie.name, cookie.value);
+  }
+  const cookies = Array.from(byName.entries())
+    .sort(([nameA], [nameB]) => nameA.localeCompare(nameB))
+    .map(([name, value]) => `${name}=${value}`);
+  return {
+    header: cookies.join("; "),
+    count: cookies.length,
+    hasLogin: byName.has("sessionid") || byName.has("sessionid_ss") || byName.has("sid_guard"),
+  };
 }
 
 async function importCookieToDashboard() {
   setStatus("读取抖音 Cookie...");
   const cookie = await getDouyinCookies();
-  if (!cookie) {
+  if (!cookie.header) {
     setStatus("没有读到 Cookie，请先在 Chrome 登录 douyin.com");
     return;
   }
@@ -135,12 +148,12 @@ async function importCookieToDashboard() {
   const response = await fetch("http://127.0.0.1:8787/api/secrets", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ douyin_cookie: cookie })
+    body: JSON.stringify({ douyin_cookie: cookie.header })
   });
   if (!response.ok) {
     throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
   }
-  setStatus("抖音 Cookie 已导入本地");
+  setStatus(`抖音 Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}`);
 }
 
 function openDashboard() {
