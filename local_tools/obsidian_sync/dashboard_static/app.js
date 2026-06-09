@@ -1,6 +1,8 @@
 const state = {
   config: null,
   statusTimer: null,
+  lastRunning: false,
+  lastReturnCode: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -47,11 +49,74 @@ function renderStatus(status) {
     badge($("workerBadge"), `失败 ${status.worker.returncode}`, "bad");
   }
   $("subtitle").textContent = `${status.output.path}`;
+  maybeNotify(status.worker);
 }
 
 function renderLogs(worker) {
   $("logPath").textContent = worker.log_path || "";
   $("logText").textContent = worker.log_tail || "暂无日志";
+  renderRunMeta(worker);
+}
+
+function statusLabel(status) {
+  if (status === "done") return "完成";
+  if (status === "error") return "错误";
+  if (status === "unknown") return "异常结束";
+  return "运行中";
+}
+
+function renderRunMeta(worker) {
+  const analysis = worker.analysis || {};
+  const errorCount = analysis.error_count || 0;
+  const warningCount = analysis.warning_count || 0;
+  const recentFiles = worker.recent_files || [];
+  badge(
+    $("runSummary"),
+    `错误 ${errorCount} / 警告 ${warningCount} / 文件 ${recentFiles.length}`,
+    errorCount ? "bad" : (warningCount ? "warn" : "ok")
+  );
+
+  const errors = (analysis.errors || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  const warnings = (analysis.warnings || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  $("logSummary").innerHTML = `
+    <div><strong>错误</strong><ul>${errors || "<li>暂无</li>"}</ul></div>
+    <div><strong>警告</strong><ul>${warnings || "<li>暂无</li>"}</ul></div>
+  `;
+
+  const history = worker.history || [];
+  $("historyList").innerHTML = history.length ? history.slice().reverse().map((run) => `
+    <div class="history-item ${escapeHtml(run.status || "")}">
+      <div>
+        <strong>${statusLabel(run.status)}</strong>
+        <span>${escapeHtml(run.started_at || "")}</span>
+      </div>
+      <p>seen=${run.seen ?? "-"} processed=${run.processed ?? "-"} wrote=${(run.wrote || []).length}</p>
+      <code>${escapeHtml(run.command || "")}</code>
+    </div>
+  `).join("") : `<p class="empty">暂无运行记录</p>`;
+
+  $("recentFiles").innerHTML = recentFiles.length ? recentFiles.map((file) => `
+    <button type="button" class="file-item" data-path="${escapeHtml(file.path)}">
+      <span>${escapeHtml(file.name)}</span>
+      <small>${escapeHtml(file.modified || "")}</small>
+    </button>
+  `).join("") : `<p class="empty">暂无 Markdown 文件</p>`;
+}
+
+function maybeNotify(worker) {
+  const running = Boolean(worker.running);
+  const finished = state.lastRunning && !running;
+  if (finished) {
+    const ok = worker.returncode === 0;
+    const title = ok ? "抖音同步完成" : "抖音同步失败";
+    const message = ok ? `文件已写入 ${worker.output_path || ""}` : `返回码 ${worker.returncode}`;
+    toast(`${title}：${message}`);
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification(title, { body: message });
+    }
+  }
+  state.lastRunning = running;
+  state.lastReturnCode = worker.returncode;
 }
 
 function creatorTemplate(creator = {}) {
@@ -219,6 +284,23 @@ async function stopRun() {
   await refreshStatus();
 }
 
+async function openTarget(target) {
+  const result = await api("/api/open", {
+    method: "POST",
+    body: JSON.stringify({ target }),
+  });
+  toast(`已打开：${result.opened.path}`);
+}
+
+async function requestNotifyPermission() {
+  if (!("Notification" in window)) {
+    toast("当前浏览器不支持通知");
+    return;
+  }
+  const permission = await Notification.requestPermission();
+  toast(permission === "granted" ? "完成提醒已开启" : "完成提醒未开启");
+}
+
 $("addCreator").addEventListener("click", () => {
   $("creatorList").appendChild(creatorTemplate({
     key: "",
@@ -236,6 +318,9 @@ $("saveSecrets").addEventListener("click", () => saveSecrets().catch((error) => 
 $("refresh").addEventListener("click", () => refreshStatus().catch((error) => toast(error.message)));
 $("startRun").addEventListener("click", () => startRun().catch((error) => toast(error.message)));
 $("stopRun").addEventListener("click", () => stopRun().catch((error) => toast(error.message)));
+$("notifyPermission").addEventListener("click", () => requestNotifyPermission().catch((error) => toast(error.message)));
+$("openOutput").addEventListener("click", () => openTarget("output").catch((error) => toast(error.message)));
+$("openLog").addEventListener("click", () => openTarget("log").catch((error) => toast(error.message)));
 $("creatorList").addEventListener("input", renderCreatorSelect);
 
 loadAll().catch((error) => toast(error.message));

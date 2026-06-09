@@ -337,20 +337,129 @@ def status_payload() -> Dict[str, Any]:
     }
 
 
+def output_base_path(data: Dict[str, Any]) -> Path:
+    vault_path = Path(str(data.get("vault_path", ""))).expanduser()
+    return vault_path / str(data.get("output_subdir", ""))
+
+
+def configured_log_path(data: Optional[Dict[str, Any]] = None) -> Path:
+    data = data or load_config()
+    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    return work_dir / "logs" / "dashboard_sync.log"
+
+
+def classify_log_lines(text: str) -> Dict[str, Any]:
+    warnings = []
+    errors = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        lower = line.lower()
+        if not line:
+            continue
+        if "warning" in lower or "warn " in lower:
+            warnings.append(line)
+        if (
+            line.startswith("ERROR ")
+            or "traceback" in lower
+            or "exception" in lower
+            or "failed" in lower
+            or "失败" in line
+        ):
+            errors.append(line)
+    return {
+        "warning_count": len(warnings),
+        "error_count": len(errors),
+        "warnings": warnings[-8:],
+        "errors": errors[-8:],
+    }
+
+
+def parse_run_history(text: str) -> list[Dict[str, Any]]:
+    runs = []
+    current: Optional[Dict[str, Any]] = None
+    for raw in text.splitlines():
+        start_match = re.match(r"^\[([^\]]+)\] START (.*)$", raw)
+        if start_match:
+            if current:
+                runs.append(current)
+            current = {
+                "started_at": start_match.group(1),
+                "command": start_match.group(2),
+                "status": "running",
+                "seen": None,
+                "processed": None,
+                "output": "",
+                "errors": [],
+                "warnings": [],
+                "wrote": [],
+            }
+            continue
+        if not current:
+            continue
+        line = raw.strip()
+        lower = line.lower()
+        if line.startswith("DONE "):
+            current["status"] = "done"
+            seen = re.search(r"seen=(\d+)", line)
+            processed = re.search(r"processed=(\d+)", line)
+            output = re.search(r"output=(.*)$", line)
+            current["seen"] = int(seen.group(1)) if seen else None
+            current["processed"] = int(processed.group(1)) if processed else None
+            current["output"] = output.group(1) if output else ""
+        elif line.startswith("ERROR ") or "traceback" in lower or "exception" in lower or "failed" in lower or "失败" in line:
+            current["status"] = "error"
+            current["errors"].append(line)
+        elif "warning" in lower or "warn " in lower:
+            current["warnings"].append(line)
+        elif line.startswith("WROTE "):
+            current["wrote"].append(line.replace("WROTE ", "", 1))
+    if current:
+        runs.append(current)
+    return runs[-12:]
+
+
+def recent_markdown_files(base_dir: Path) -> list[Dict[str, Any]]:
+    if not base_dir.exists():
+        return []
+    files = sorted(base_dir.rglob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True)
+    return [
+        {
+            "path": str(path),
+            "name": path.name,
+            "modified": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+        }
+        for path in files[:12]
+    ]
+
+
 def worker_status() -> Dict[str, Any]:
-    global worker_process
+    global worker_process, worker_log
+    data = load_config()
+    if worker_log is None:
+        worker_log = configured_log_path(data)
     running = bool(worker_process and worker_process.poll() is None)
     code = None if running or worker_process is None else worker_process.returncode
     log_text = ""
     if worker_log and worker_log.exists():
         text = worker_log.read_text(encoding="utf-8", errors="replace")
         log_text = text[-12000:]
+    else:
+        text = ""
+    analysis = classify_log_lines(text)
+    history = parse_run_history(text)
+    if history and not running and history[-1]["status"] == "running":
+        history[-1]["status"] = "unknown"
+    output_base = output_base_path(data)
     return {
         "running": running,
         "returncode": code,
         "pid": worker_process.pid if running and worker_process else None,
         "log_path": str(worker_log) if worker_log else None,
         "log_tail": log_text,
+        "analysis": analysis,
+        "history": history,
+        "output_path": str(output_base),
+        "recent_files": recent_markdown_files(output_base),
     }
 
 
@@ -455,6 +564,24 @@ def stop_sync() -> Dict[str, Any]:
     return worker_status()
 
 
+def open_local_target(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = load_config()
+    target = str(payload.get("target", "output")).strip()
+    if target == "log":
+        path = configured_log_path(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("", encoding="utf-8")
+    elif target == "vault":
+        path = Path(str(data.get("vault_path", ""))).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+    else:
+        path = output_base_path(data)
+        path.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(["open", str(path)])
+    return {"target": target, "path": str(path)}
+
+
 def read_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0"))
     body = handler.rfile.read(length).decode("utf-8") if length else "{}"
@@ -525,6 +652,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_sync(payload)})
             elif path == "/api/run/stop":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": stop_sync()})
+            elif path == "/api/open":
+                self.send_json(HTTPStatus.OK, {"ok": True, "opened": open_local_target(payload)})
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
         except Exception as exc:  # noqa: BLE001

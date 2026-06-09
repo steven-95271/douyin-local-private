@@ -157,6 +157,10 @@ main {
   margin-bottom: 12px;
 }
 
+.panel-head.compact {
+  margin-top: 14px;
+}
+
 .panel h3 {
   font-size: 16px;
 }
@@ -247,6 +251,93 @@ button:hover {
 .panel-actions {
   gap: 8px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.log-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.log-summary > div,
+.history-item,
+.file-item {
+  border: 1px solid #ecece7;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfbf8;
+}
+
+.log-summary strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.log-summary ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-list,
+.file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.history-item {
+  display: grid;
+  gap: 6px;
+}
+
+.history-item > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.history-item.done strong {
+  color: var(--ok);
+}
+
+.history-item.error strong,
+.history-item.unknown strong {
+  color: var(--bad);
+}
+
+.history-item.running strong {
+  color: var(--warn);
+}
+
+.history-item p,
+.empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-item code {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-item {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text);
+  background: #fff;
+  text-align: left;
+}
+
+.file-item small {
+  color: var(--muted);
 }
 
 pre {
@@ -288,7 +379,8 @@ pre {
 
   .two-col,
   .run-grid,
-  .creator-row {
+  .creator-row,
+  .log-summary {
     grid-template-columns: 1fr;
   }
 }

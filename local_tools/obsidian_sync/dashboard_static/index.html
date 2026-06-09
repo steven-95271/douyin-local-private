@@ -20,6 +20,7 @@
           <a href="#creators" class="active">博主</a>
           <a href="#settings">设置</a>
           <a href="#run">运行</a>
+          <a href="#history">记录</a>
           <a href="#logs">日志</a>
         </nav>
       </aside>
@@ -106,7 +107,23 @@
           <div class="panel-actions">
             <button id="startRun" type="button">启动任务</button>
             <button id="stopRun" type="button" class="secondary">停止任务</button>
+            <button id="notifyPermission" type="button" class="secondary">允许完成提醒</button>
+            <button id="openOutput" type="button" class="secondary">打开输出目录</button>
+            <button id="openLog" type="button" class="secondary">打开日志</button>
           </div>
+        </section>
+
+        <section id="history" class="panel">
+          <div class="panel-head">
+            <h3>运行记录</h3>
+            <span id="runSummary" class="badge">暂无</span>
+          </div>
+          <div id="logSummary" class="log-summary"></div>
+          <div id="historyList" class="history-list"></div>
+          <div class="panel-head compact">
+            <h3>最近文件</h3>
+          </div>
+          <div id="recentFiles" class="file-list"></div>
         </section>
 
         <section id="logs" class="panel">
