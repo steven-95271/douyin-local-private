@@ -365,13 +365,51 @@ def classify_log_lines(text: str) -> Dict[str, Any]:
             or "failed" in lower
             or "失败" in line
         ):
-            errors.append(line)
+            errors.append(humanize_log_line(line))
     return {
         "warning_count": len(warnings),
         "error_count": len(errors),
-        "warnings": warnings[-8:],
+        "warnings": [],
         "errors": errors[-8:],
     }
+
+
+def humanize_log_line(line: str) -> str:
+    lower = line.lower()
+    video_match = re.search(r"\b(\d{12,})\b", line)
+    video_id = video_match.group(1) if video_match else ""
+    prefix = f"视频 {video_id}：" if video_id else ""
+
+    if "remoteprotocolerror" in lower or "peer closed connection without sending complete message body" in lower:
+        return (
+            f"{prefix}视频下载到一半连接断开。新版任务会自动删除半截文件并重试；"
+            "如果多次仍失败，通常是网络波动、抖音临时限流，或该视频链接短时间失效。"
+        )
+    if "视频下载中断" in line:
+        return f"{prefix}{line.split('RuntimeError:', 1)[-1].strip()}"
+    if line.startswith("RETRY "):
+        return f"{prefix}{line}"
+    if "timeout" in lower or "timed out" in lower or "readtimeout" in lower:
+        return f"{prefix}请求超时。一般是网络慢或抖音响应慢，重新跑同一个博主通常可以继续处理。"
+    if "no playable video url" in lower:
+        return f"{prefix}没有拿到可播放的视频地址。常见原因是作品权限限制、视频失效，或 Cookie 登录状态不够完整。"
+    if "not a video post" in lower:
+        return f"{prefix}这条内容不是普通视频，系统已跳过。"
+    if "ffmpeg failed" in lower:
+        return f"{prefix}音频提取失败。通常是视频文件不完整或格式异常，建议重新跑一次该博主。"
+    if "transcription returned empty" in lower:
+        return f"{prefix}转录结果为空。可能是视频没有清晰人声、音量太低，或音频提取失败。"
+    if "faster-whisper is not installed" in lower:
+        return "本地转录组件没有安装完整。需要重新运行安装脚本后再试。"
+    if "missing deepseek_api_key" in lower or "missing glm" in lower:
+        return "AI 总结密钥缺失。逐字稿流程会受影响，请检查本地 .env 配置。"
+    if "httpstatuserror" in lower or "401" in line or "403" in line:
+        return f"{prefix}请求被拒绝。常见原因是 Cookie 失效、登录态不足，或接口临时限制。"
+    if "traceback" in lower:
+        return "程序出现未预期异常。请查看下方原始日志；如果重复出现，把这段日志发给我定位。"
+    if "summary failed" in lower or "ai 总结失败" in line:
+        return f"{prefix}逐字稿已生成，但 AI 总结失败。可以稍后重新处理该视频。"
+    return line
 
 
 def parse_run_history(text: str) -> list[Dict[str, Any]]:
@@ -408,7 +446,7 @@ def parse_run_history(text: str) -> list[Dict[str, Any]]:
             current["output"] = output.group(1) if output else ""
         elif line.startswith("ERROR ") or "traceback" in lower or "exception" in lower or "failed" in lower or "失败" in line:
             current["status"] = "error"
-            current["errors"].append(line)
+            current["errors"].append(humanize_log_line(line))
         elif "warning" in lower or "warn " in lower:
             current["warnings"].append(line)
         elif line.startswith("WROTE "):

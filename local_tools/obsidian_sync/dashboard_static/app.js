@@ -68,19 +68,16 @@ function statusLabel(status) {
 function renderRunMeta(worker) {
   const analysis = worker.analysis || {};
   const errorCount = analysis.error_count || 0;
-  const warningCount = analysis.warning_count || 0;
   const recentFiles = worker.recent_files || [];
   badge(
     $("runSummary"),
-    `错误 ${errorCount} / 警告 ${warningCount} / 文件 ${recentFiles.length}`,
-    errorCount ? "bad" : (warningCount ? "warn" : "ok")
+    `错误 ${errorCount} / 文件 ${recentFiles.length}`,
+    errorCount ? "bad" : "ok"
   );
 
   const errors = (analysis.errors || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
-  const warnings = (analysis.warnings || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("");
   $("logSummary").innerHTML = `
-    <div><strong>错误</strong><ul>${errors || "<li>暂无</li>"}</ul></div>
-    <div><strong>警告</strong><ul>${warnings || "<li>暂无</li>"}</ul></div>
+    <div><strong>错误说明</strong><ul>${errors || "<li>暂无错误</li>"}</ul></div>
   `;
 
   const history = worker.history || [];

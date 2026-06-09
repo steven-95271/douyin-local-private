@@ -323,7 +323,38 @@ async def download_video_to_temp(crawler: Any, video: CreatorVideo, cfg: Dict[st
 
     temp_path = temp_dir / f"{video.video_id}.mp4"
     headers = await headers_for_platform(crawler, "douyin")
-    await stream_to_file(str(video_url), temp_path, headers, float(cfg.get("timeout_seconds", 120)))
+    timeout = float(cfg.get("timeout_seconds", 120))
+    retry_attempts = max(1, int(cfg.get("retry_attempts", 3)))
+    retry_delay = max(0.0, float(cfg.get("retry_delay_seconds", 5)))
+    retryable_errors = (
+        httpx.RemoteProtocolError,
+        httpx.ReadError,
+        httpx.ConnectError,
+        httpx.TimeoutException,
+        httpx.HTTPError,
+    )
+
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            await stream_to_file(str(video_url), temp_path, headers, timeout)
+            return temp_path
+        except retryable_errors as exc:
+            for partial_path in (temp_path, temp_path.with_suffix(temp_path.suffix + ".part")):
+                if partial_path.exists():
+                    partial_path.unlink()
+            if attempt >= retry_attempts:
+                raise RuntimeError(
+                    f"视频下载中断，已自动重试 {retry_attempts} 次仍失败。"
+                    "通常是网络波动、抖音临时限流，或该视频链接短时间失效。"
+                    f"原始错误：{type(exc).__name__}: {exc}"
+                ) from exc
+            print(
+                f"RETRY {video.video_id} 下载中断，"
+                f"第 {attempt}/{retry_attempts} 次失败，{retry_delay:g} 秒后自动重试"
+            )
+            if retry_delay > 0:
+                await asyncio.sleep(retry_delay)
+
     return temp_path
 
 
