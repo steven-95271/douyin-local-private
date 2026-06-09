@@ -116,7 +116,10 @@ DeepSeek API Key 保存过一次后会一直沿用；后续留空保存不会覆
 
 ## 定时同步
 
-周度同步脚本会先同步所有启用博主的新视频，再生成过去 7 天的周报，并调用 Hermes 发送 Telegram 精简版。
+周度自动化拆成两个任务：
+
+1. 周日 22:00：同步所有启用博主的新视频，生成本地 Markdown。
+2. 周一 11:00：读取过去 7 天新增 Markdown，生成周报，并调用 Hermes 发送 Telegram 精简版。
 
 手动测试周报，不发送 Hermes：
 
@@ -125,7 +128,14 @@ cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api
 .venv/bin/python local_tools/obsidian_sync/weekly_brief.py --no-hermes
 ```
 
-安装每周一 11:00 自动运行：
+手动同步所有启用博主：
+
+```bash
+cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
+bash local_tools/run_weekly_content_sync.sh
+```
+
+安装定时任务：
 
 ```bash
 cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
@@ -141,5 +151,6 @@ bash local_tools/install_weekly_launchd.sh
 自动任务日志：
 
 ```text
-local_tools/obsidian_sync/work/logs/weekly_sync.log
+local_tools/obsidian_sync/work/logs/weekly_content_sync.log
+local_tools/obsidian_sync/work/logs/weekly_brief.log
 ```
