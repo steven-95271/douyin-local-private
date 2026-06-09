@@ -1,53 +1,104 @@
-# Obsidian Sync
+# Douyin -> Obsidian Sync
 
-这个工具用于把指定抖音博主的新视频转成 Obsidian Markdown 笔记。
+内部自用工具：把已配置抖音口播博主的视频自动转成 Obsidian Markdown 笔记。
 
-默认流程：
+## 能做什么
 
-1. 拉取 `creators.yaml` 里启用的博主作品列表。
-2. 跳过 `state.sqlite` 里已经处理成功的视频。
-3. 临时下载视频。
-4. 用 `ffmpeg` 抽音频。
-5. 用 `faster-whisper` 本地转录。
-6. 用 DeepSeek 生成总结。
-7. 写入 Obsidian Vault。
-8. 删除临时视频和音频。
+- 维护一个「博主库」。
+- 自动抓取启用博主的新视频。
+- 跳过已经成功处理过的视频。
+- 临时下载视频，抽音频，本地 Whisper 转录。
+- 调用 DeepSeek 生成结构化笔记。
+- 写入 Obsidian Vault。
+- 删除临时视频和音频，只保留 Markdown。
+- 每周定时同步内容，并生成周报发送到 Hermes/Telegram。
 
-## 初始化
+## 常用入口
 
-安装基础依赖后，再安装转录依赖：
+启动 Dashboard：
 
 ```bash
 cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
-bash local_tools/setup_obsidian_sync.sh
+bash local_tools/start_obsidian_dashboard.sh
 ```
 
-确保本机有 `ffmpeg`：
-
-```bash
-ffmpeg -version
-```
-
-如果没有，可以用 Homebrew 安装：
-
-```bash
-brew install ffmpeg
-```
-
-## 配置博主
-
-编辑：
+打开：
 
 ```text
-local_tools/obsidian_sync/creators.yaml
+http://127.0.0.1:8787
 ```
 
-把 `creators` 里的示例改成真实博主：
+Dashboard 用来做这些事：
+
+- 添加、补全、启用、停用博主。
+- 导入 Cookie 和保存 DeepSeek API Key。
+- 启动单个博主抓取。
+- 串行跑所有启用博主。
+- 查看最近一次任务进度和每条视频状态。
+- 打开输出目录和日志。
+
+## 输出位置
+
+视频笔记：
+
+```text
+/Users/steven/Documents/Obsidian/MyVault/Douyin/口播博主
+```
+
+周报：
+
+```text
+/Users/steven/Documents/Obsidian/MyVault/Douyin/周报
+```
+
+单篇笔记文件名：
+
+```text
+视频名-博主名-日期-视频ID.md
+```
+
+## 笔记结构
+
+新生成或重新处理的笔记会包含：
+
+- 一句话总结
+- 摘要
+- 逻辑树
+- Mermaid 思维导图
+- 分段解析
+- 核心观点
+- 关键概念
+- 可复用表达
+- 行动项
+- 关键词
+- 逐字稿
+
+已经成功生成过的旧笔记默认不会重复处理。需要升级旧笔记格式时，在 Dashboard 勾选「重新处理」后再跑。
+
+## Cookie
+
+默认 Cookie 文件：
+
+```text
+local_tools/douyin_cookie.txt
+```
+
+Chrome 插件目录：
+
+```text
+/Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private/chrome_extension
+```
+
+导入步骤：
+
+1. 浏览器登录 `https://www.douyin.com`。
+2. 打开 `chrome://extensions/`。
+3. 加载或重新加载上面的插件目录。
+4. 点击插件图标，导入抖音 Cookie。
+
+多账号可以配置多个 Cookie Profile：
 
 ```yaml
-sync:
-  max_concurrency: 2
-
 douyin_cookie_profiles:
   default: local_tools/douyin_cookie.txt
   spare: local_tools/douyin_cookie_spare.txt
@@ -56,116 +107,86 @@ creators:
   - name: 某某博主
     url: https://www.douyin.com/user/...
     enabled: true
-    category: 投资商业
-    language: 中文
-    content_type: 口播
     cookie_profile: default
-    tags:
-      - douyin
-      - 口播
 ```
 
-`key` 会在后台自动生成。`cookie_profile` 是可选项，用于多账号登录态管理；不配置时使用默认 Cookie。
+不配置 `cookie_profile` 时使用默认 Cookie。建议按博主绑定账号，不要高频轮换。
 
-## 运行
+## 博主库
 
-推荐使用本地 Dashboard：
+新增博主时，只需要填主页 URL，然后点「URL 补全」。
 
-```bash
-cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
-bash local_tools/start_obsidian_dashboard.sh
-```
+系统会自动尝试读取：
 
-然后打开：
+- 昵称
+- 简介
+- 最近视频标题
+- 分类
+- 语言
+- 内容类型
+- 标签
+- 后台内部 key
 
-```text
-http://127.0.0.1:8787
-```
+`key` 是程序内部 ID，前端默认不展示。
 
-页面里可以维护博主、保存 Cookie/API Key、启动同步任务。
+## 自动任务
 
-如果要一次性抓取某个博主的所有可扫描视频，在「同步任务」里先选择具体博主，再点「全量抓取该博主」。这个按钮会把数量限制设为 `0`，并跳过已经成功生成过 Markdown 的视频。
+已配置两个 macOS `launchd` 任务：
 
-新增博主时可以只填「主页 URL」，再点「URL 补全」。工具会尝试读取抖音昵称、简介和最近视频标题，并自动生成：
+- 周日 22:00：同步所有启用博主的新视频。
+- 周一 11:00：生成周报，并通过 Hermes 发送 Telegram 精简版。
 
-- `name`：优先使用抖音接口返回的真实博主昵称，用于 Obsidian 文件夹和笔记 frontmatter。
-- `key`：后台唯一 ID，前端默认不展示。
-- `category` / `language` / `content_type` / `tags`：用于分类、标签和后续周报聚合。
+自动任务不依赖 Dashboard 页面，也不依赖 `8787` 端口。电脑需要处于开机且网络可用状态。
 
-如果补全失败，先导入抖音 Cookie。没有登录态时，抖音主页通常不会稳定返回真实昵称。
-
-Cookie 可以手动粘贴，也可以通过 Chrome 插件导入。插件导入方式：
-
-1. Chrome 登录 `https://www.douyin.com`。
-2. 打开 `chrome://extensions/`，加载或重新加载本项目的插件目录：`/Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private/chrome_extension`。
-3. 点击插件图标。
-4. 点击「导入抖音 Cookie」。
-
-DeepSeek API Key 保存过一次后会一直沿用；后续留空保存不会覆盖旧 Key。
-
-命令行也可以直接使用：
-
-先做 dry-run，只看会发现哪些视频：
-
-```bash
-.venv/bin/python local_tools/obsidian_sync/sync.py --dry-run --limit 5
-```
-
-正式处理前 3 条新视频：
-
-```bash
-.venv/bin/python local_tools/obsidian_sync/sync.py --limit 3
-```
-
-只转录不调用 DeepSeek 总结：
-
-```bash
-.venv/bin/python local_tools/obsidian_sync/sync.py --limit 3 --skip-summary
-```
-
-输出目录默认是：
-
-```text
-/Users/steven/Documents/Obsidian/MyVault/Douyin/口播博主
-```
-
-## 定时同步
-
-周度自动化拆成两个任务：
-
-1. 周日 22:00：同步所有启用博主的新视频，生成本地 Markdown。
-2. 周一 11:00：读取过去 7 天新增 Markdown，生成周报，并调用 Hermes 发送 Telegram 精简版。
-
-手动测试周报，不发送 Hermes：
-
-```bash
-cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
-.venv/bin/python local_tools/obsidian_sync/weekly_brief.py --no-hermes
-```
-
-手动同步所有启用博主：
-
-```bash
-cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
-bash local_tools/run_weekly_content_sync.sh
-```
-
-安装定时任务：
+手动安装或更新定时任务：
 
 ```bash
 cd /Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private
 bash local_tools/install_weekly_launchd.sh
 ```
 
-周报默认输出：
+手动跑一次所有启用博主：
 
-```text
-/Users/steven/Documents/Obsidian/MyVault/Douyin/周报
+```bash
+bash local_tools/run_weekly_content_sync.sh
 ```
 
-自动任务日志：
+手动生成周报，不发送 Hermes：
+
+```bash
+.venv/bin/python local_tools/obsidian_sync/weekly_brief.py --no-hermes
+```
+
+## 日志和状态
+
+Dashboard 日志：
+
+```text
+local_tools/obsidian_sync/work/logs/dashboard_sync.log
+```
+
+周日同步日志：
 
 ```text
 local_tools/obsidian_sync/work/logs/weekly_content_sync.log
+```
+
+周报日志：
+
+```text
 local_tools/obsidian_sync/work/logs/weekly_brief.log
 ```
+
+本地状态库：
+
+```text
+local_tools/obsidian_sync/state.sqlite
+```
+
+## 注意
+
+- `creators.yaml` 是本地配置，不要提交到 GitHub。
+- `.env`、Cookie、API Key 都只保存在本地。
+- Dashboard 默认处理所有可扫描的新视频，已成功处理过的视频会自动跳过。
+- 默认每个博主最多 2 条视频并发处理，博主之间仍然串行。
+- 报错视频会记录在运行记录里，重新跑时会再次尝试。
