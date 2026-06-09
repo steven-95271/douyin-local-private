@@ -28,6 +28,8 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 settings: Optional[argparse.Namespace] = None
 worker_process: Optional[subprocess.Popen] = None
@@ -195,6 +197,11 @@ def extract_author_name_from_item(item: Dict[str, Any]) -> str:
     return ""
 
 
+def extract_sec_user_id_from_url(url: str) -> str:
+    match = re.search(r"/user/([^/?#]+)", url)
+    return match.group(1) if match else ""
+
+
 def extract_name_from_html(html_text: str) -> str:
     candidates = [
         extract_meta(html_text, "og:title"),
@@ -224,7 +231,7 @@ async def fetch_douyin_creator_profile(url: str, cookie: str) -> Dict[str, Any]:
 
     apply_runtime_cookies(cookie or None, None)
     crawler = DouyinWebCrawler()
-    sec_user_id = await crawler.get_sec_user_id(url)
+    sec_user_id = extract_sec_user_id_from_url(url) or await crawler.get_sec_user_id(url)
     response = await crawler.fetch_user_post_videos(str(sec_user_id), 0, 1)
     data = response.get("data") if isinstance(response.get("data"), dict) else response
     items = data.get("aweme_list") or data.get("aweme_list_v2") or data.get("items") or []
@@ -247,9 +254,11 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
     cookie = cookie_file.read_text(encoding="utf-8").strip() if cookie_file.exists() else ""
     profile: Dict[str, Any] = {}
+    errors = []
     try:
         profile = asyncio.run(fetch_douyin_creator_profile(url, cookie))
-    except Exception:
+    except Exception as exc:
+        errors.append(f"profile:{type(exc).__name__}:{exc}")
         profile = {}
 
     headers = {
@@ -269,12 +278,16 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         with urlopen(request, timeout=15) as response:
             final_url = response.geturl()
             html_text = response.read(2_000_000).decode("utf-8", errors="replace")
-    except Exception:
+    except Exception as exc:
+        errors.append(f"html:{type(exc).__name__}:{exc}")
         final_url = url
 
     name = clean_creator_name(str(profile.get("name", ""))) or extract_name_from_html(html_text)
     if not name:
-        raise ValueError("没有获取到博主昵称。请先用 Chrome 插件导入抖音 Cookie，再点 URL 补全。")
+        detail = "；".join(errors[-2:])
+        if detail:
+            raise ValueError(f"没有获取到博主昵称。内部原因：{detail}")
+        raise ValueError("没有获取到博主昵称。请确认主页 URL 正确，并先用 Chrome 插件导入抖音 Cookie。")
 
     key = pinyin_initials(name)
     if not key:
