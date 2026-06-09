@@ -4,6 +4,8 @@ const els = {
   scrollCollect: document.getElementById("scrollCollect"),
   send: document.getElementById("send"),
   export: document.getElementById("export"),
+  importCookie: document.getElementById("importCookie"),
+  openDashboard: document.getElementById("openDashboard"),
   urls: document.getElementById("urls"),
   status: document.getElementById("status"),
   rounds: document.getElementById("rounds"),
@@ -100,9 +102,56 @@ function exportTxt() {
   });
 }
 
+function getDouyinCookies() {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.getAll({ domain: ".douyin.com" }, (cookies) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      const header = cookies
+        .filter((cookie) => cookie.name && cookie.value)
+        .sort((a, b) => {
+          if (a.domain !== b.domain) return a.domain.localeCompare(b.domain);
+          return b.path.length - a.path.length || a.name.localeCompare(b.name);
+        })
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join("; ");
+      resolve(header);
+    });
+  });
+}
+
+async function importCookieToDashboard() {
+  setStatus("读取抖音 Cookie...");
+  const cookie = await getDouyinCookies();
+  if (!cookie) {
+    setStatus("没有读到 Cookie，请先在 Chrome 登录 douyin.com");
+    return;
+  }
+
+  setStatus("写入本地同步面板...");
+  const response = await fetch("http://127.0.0.1:8787/api/secrets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ douyin_cookie: cookie })
+  });
+  if (!response.ok) {
+    throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
+  }
+  setStatus("抖音 Cookie 已导入本地");
+}
+
+function openDashboard() {
+  chrome.tabs.create({ url: "http://127.0.0.1:8787" });
+}
+
 els.collect.addEventListener("click", () => collect(false).catch((error) => setStatus(String(error.message || error))));
 els.scrollCollect.addEventListener("click", () => collect(true).catch((error) => setStatus(String(error.message || error))));
 els.send.addEventListener("click", () => sendToLocal().catch((error) => setStatus(String(error.message || error))));
 els.export.addEventListener("click", exportTxt);
+els.importCookie.addEventListener("click", () => importCookieToDashboard().catch((error) => setStatus(String(error.message || error))));
+els.openDashboard.addEventListener("click", openDashboard);
 
 chrome.storage.local.get({ urls: [] }, (data) => render(data.urls || []));

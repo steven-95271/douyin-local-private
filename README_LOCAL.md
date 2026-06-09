@@ -114,7 +114,7 @@ python local_tools/batch_download.py --input local_tools/urls.txt --douyin-cooki
 chrome_extension/
 ```
 
-它只负责从当前抖音页面收集已经加载到页面里的作品链接，不读取、不导出你的浏览器 Cookie。登录抖音账号的作用是让你能在浏览器里看到对应页面和链接；本地下载服务是否能解析下载，仍可能需要你准备 `local_tools/douyin_cookie.txt`。
+它负责从当前抖音页面收集已经加载到页面里的作品链接。新版插件还可以在你授权后读取 Chrome 里 `douyin.com` 的 Cookie，并写入本机同步面板 `http://127.0.0.1:8787`。Cookie 只写入本地文件，不会提交到 GitHub。
 
 启动本地接收服务：
 
@@ -153,6 +153,13 @@ http://127.0.0.1:8765
 5. 需要插件慢速滚动时，设置「滚动轮数」后点「慢速滚动收集」。
 6. 点「发送到本地」写入本地队列。
 7. 勾选「发送后启动下载」时，会直接启动本地批量下载任务。
+
+如果要给 Obsidian 同步面板导入 Cookie：
+
+1. 先启动 `bash local_tools/start_obsidian_dashboard.sh`。
+2. 在 Chrome 登录抖音网页版。
+3. 打开插件，点「导入抖音 Cookie」。
+4. 回到 `http://127.0.0.1:8787`，确认顶部显示 `Cookie OK`。
 
 插件发送的队列文件是：
 
@@ -205,7 +212,7 @@ bash local_tools/start_obsidian_dashboard.sh
 http://127.0.0.1:8787
 ```
 
-以后新增博主、更新 Cookie、启动 dry-run/同步都可以在这个页面完成。
+以后新增博主、更新 Cookie、启动 dry-run/同步都可以在这个页面完成。新增博主时可以只填主页 URL，再点「URL 补全」自动生成 Key 和名称。
 
 编辑博主配置：
 

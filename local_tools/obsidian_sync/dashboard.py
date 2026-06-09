@@ -8,8 +8,11 @@ The server binds to 127.0.0.1 by default and never returns secret values.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import yaml
 
@@ -102,6 +106,98 @@ def update_env_value(env_path: Path, key: str, value: str) -> None:
     if not replaced:
         out.append(f"{key}={value}")
     env_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+def safe_key_part(value: str) -> str:
+    value = value.lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value[:36]
+
+
+def clean_creator_name(value: str) -> str:
+    value = html.unescape(value or "")
+    value = re.sub(r"\s+", " ", value).strip()
+    replacements = [
+        "的抖音主页",
+        "的主页",
+        "- 抖音",
+        "_抖音",
+        " - Douyin",
+        " | 抖音",
+    ]
+    for item in replacements:
+        value = value.replace(item, "")
+    return value.strip(" -_|")
+
+
+def extract_meta(html_text: str, name: str) -> str:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{re.escape(name)}["\']',
+        rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
+    raw_url = str(payload.get("url", "")).strip()
+    if not raw_url:
+        raise ValueError("url is required")
+    url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
+    parsed = urlparse(url)
+    if "douyin.com" not in parsed.netloc:
+        raise ValueError("Only douyin.com creator URLs are supported")
+
+    data = load_config()
+    cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
+    cookie = cookie_file.read_text(encoding="utf-8").strip() if cookie_file.exists() else ""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=15) as response:
+        final_url = response.geturl()
+        html_text = response.read(2_000_000).decode("utf-8", errors="replace")
+
+    name = (
+        clean_creator_name(extract_meta(html_text, "og:title"))
+        or clean_creator_name(extract_meta(html_text, "twitter:title"))
+    )
+    if not name:
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
+        if title_match:
+            name = clean_creator_name(title_match.group(1))
+    if not name:
+        name = "douyin_creator"
+
+    user_match = re.search(r"/user/([^/?#]+)", final_url) or re.search(r"/user/([^/?#]+)", url)
+    user_id = user_match.group(1) if user_match else ""
+    key_source = user_id or final_url or url
+    key_slug = safe_key_part(name)
+    if not key_slug or key_slug == "douyin_creator":
+        key_slug = "douyin"
+    digest = hashlib.sha1(key_source.encode("utf-8")).hexdigest()[:10]
+    key = f"{key_slug}_{digest}"
+
+    return {
+        "key": key,
+        "name": name,
+        "url": final_url,
+        "enabled": True,
+        "tags": ["douyin", "口播"],
+    }
 
 
 def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,6 +373,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
         self.wfile.write(data)
 
@@ -312,6 +411,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "config": save_public_config(payload)})
             elif path == "/api/secrets":
                 self.send_json(HTTPStatus.OK, {"ok": True, "status": save_secrets(payload)})
+            elif path == "/api/creator/resolve":
+                self.send_json(HTTPStatus.OK, {"ok": True, "creator": resolve_creator_from_url(payload)})
             elif path == "/api/run":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_sync(payload)})
             elif path == "/api/run/stop":
@@ -320,6 +421,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
         except Exception as exc:  # noqa: BLE001
             self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+    def do_OPTIONS(self) -> None:
+        self.send_bytes(HTTPStatus.NO_CONTENT, b"", "text/plain; charset=utf-8")
 
 
 def parse_args() -> argparse.Namespace:

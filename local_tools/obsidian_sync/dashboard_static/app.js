@@ -63,9 +63,11 @@ function creatorTemplate(creator = {}) {
     <label>主页 URL<input data-field="url" value="${escapeHtml(creator.url || "")}"></label>
     <label class="check"><input data-field="enabled" type="checkbox" ${creator.enabled !== false ? "checked" : ""}><span>启用</span></label>
     <label>标签<input data-field="tags" value="${escapeHtml((creator.tags || ["douyin", "口播"]).join(", "))}"></label>
+    <button type="button" class="secondary" data-action="resolve">URL 补全</button>
     <button type="button" class="secondary" data-action="remove">删除</button>
   `;
   row.querySelector('[data-action="remove"]').addEventListener("click", () => row.remove());
+  row.querySelector('[data-action="resolve"]').addEventListener("click", () => resolveCreator(row).catch((error) => toast(error.message)));
   return row;
 }
 
@@ -117,6 +119,33 @@ function renderCreatorSelect() {
     select.appendChild(option);
   }
   if (current) select.value = current;
+}
+
+async function resolveCreator(row) {
+  const urlInput = row.querySelector('[data-field="url"]');
+  const url = urlInput.value.trim();
+  if (!url) {
+    throw new Error("请先填写主页 URL");
+  }
+  const button = row.querySelector('[data-action="resolve"]');
+  button.disabled = true;
+  button.textContent = "补全中";
+  try {
+    const result = await api("/api/creator/resolve", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    });
+    row.querySelector('[data-field="key"]').value = result.creator.key || "";
+    row.querySelector('[data-field="name"]').value = result.creator.name || "";
+    row.querySelector('[data-field="url"]').value = result.creator.url || url;
+    row.querySelector('[data-field="enabled"]').checked = result.creator.enabled !== false;
+    row.querySelector('[data-field="tags"]').value = (result.creator.tags || ["douyin", "口播"]).join(", ");
+    renderCreatorSelect();
+    toast("博主信息已补全");
+  } finally {
+    button.disabled = false;
+    button.textContent = "URL 补全";
+  }
 }
 
 async function loadAll() {
@@ -189,7 +218,7 @@ async function stopRun() {
 
 $("addCreator").addEventListener("click", () => {
   $("creatorList").appendChild(creatorTemplate({
-    key: `creator_${Date.now().toString().slice(-6)}`,
+    key: "",
     name: "",
     url: "",
     enabled: true,

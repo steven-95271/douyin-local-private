@@ -72,6 +72,20 @@ http://127.0.0.1:8787
 
 页面里可以维护博主、保存 Cookie/API Key、启动 dry-run 或正式同步。
 
+新增博主时可以只填「主页 URL」，再点「URL 补全」。工具会尝试读取抖音主页标题，自动生成：
+
+- `key`：本地唯一 ID，基于主页 URL 稳定生成。
+- `name`：用于 Obsidian 文件夹和笔记 frontmatter 的博主名称。
+
+Cookie 可以手动粘贴，也可以通过 Chrome 插件导入。插件导入方式：
+
+1. Chrome 登录 `https://www.douyin.com`。
+2. 打开 `chrome://extensions/`，重新加载本项目的插件。
+3. 点击插件图标。
+4. 点击「导入抖音 Cookie」。
+
+DeepSeek API Key 保存过一次后会一直沿用；后续留空保存不会覆盖旧 Key。
+
 命令行也可以直接使用：
 
 先做 dry-run，只看会发现哪些视频：

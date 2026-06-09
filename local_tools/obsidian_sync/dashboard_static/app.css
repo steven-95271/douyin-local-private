@@ -214,7 +214,7 @@ button:hover {
 
 .creator-row {
   display: grid;
-  grid-template-columns: 120px 160px minmax(220px, 1fr) 80px 160px 72px;
+  grid-template-columns: 140px 160px minmax(220px, 1fr) 80px 150px 92px 72px;
   gap: 8px;
   align-items: end;
   border: 1px solid #ecece7;
