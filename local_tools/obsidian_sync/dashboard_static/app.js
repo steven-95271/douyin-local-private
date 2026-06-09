@@ -277,6 +277,20 @@ async function startRun() {
   await refreshStatus();
 }
 
+async function crawlSelectedCreatorAll() {
+  const creator = $("runCreator").value;
+  if (!creator) {
+    throw new Error("请先在“指定博主”里选择一个博主");
+  }
+  $("runLimit").value = "0";
+  $("dryRun").checked = false;
+  $("skipSummary").checked = false;
+  const creatorLabel = $("runCreator").selectedOptions[0]?.textContent || creator;
+  const confirmed = window.confirm(`将正式抓取 ${creatorLabel} 的所有可扫描视频，并生成 Markdown。已成功处理过的视频会自动跳过。继续吗？`);
+  if (!confirmed) return;
+  await startRun();
+}
+
 async function stopRun() {
   const result = await api("/api/run/stop", { method: "POST", body: "{}" });
   renderLogs(result.worker);
@@ -317,6 +331,7 @@ $("saveSettings").addEventListener("click", () => saveConfig(false).catch((error
 $("saveSecrets").addEventListener("click", () => saveSecrets().catch((error) => toast(error.message)));
 $("refresh").addEventListener("click", () => refreshStatus().catch((error) => toast(error.message)));
 $("startRun").addEventListener("click", () => startRun().catch((error) => toast(error.message)));
+$("crawlCreatorAll").addEventListener("click", () => crawlSelectedCreatorAll().catch((error) => toast(error.message)));
 $("stopRun").addEventListener("click", () => stopRun().catch((error) => toast(error.message)));
 $("notifyPermission").addEventListener("click", () => requestNotifyPermission().catch((error) => toast(error.message)));
 $("openOutput").addEventListener("click", () => openTarget("output").catch((error) => toast(error.message)));
