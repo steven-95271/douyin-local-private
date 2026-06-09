@@ -1,0 +1,6 @@
+# Put one share URL per line.
+# Lines starting with # are ignored.
+#
+# Example:
+# https://www.douyin.com/video/7372484719365098803
+# https://v.douyin.com/example/

@@ -1,0 +1,43 @@
+vault_path: /Users/steven/Documents/Obsidian/MyVault
+output_subdir: Douyin/口播博主
+state_db: local_tools/obsidian_sync/state.sqlite
+work_dir: local_tools/obsidian_sync/work
+env_file: local_tools/obsidian_sync/.env
+douyin_cookie_file: local_tools/douyin_cookie.txt
+
+fetch:
+  count_per_page: 20
+  max_pages: 2
+  delay_seconds: 2
+
+download:
+  watermark: keep
+  timeout_seconds: 120
+  cleanup_media: true
+
+transcribe:
+  provider: faster_whisper
+  model: small
+  device: cpu
+  compute_type: int8
+  language: zh
+  vad_filter: true
+
+summary:
+  provider: deepseek
+  api_key_env: DEEPSEEK_API_KEY
+  base_url: https://api.deepseek.com
+  model: deepseek-v4-flash
+  thinking: disabled
+  temperature: 0.2
+  max_tokens: 5000
+  prompt: local_tools/obsidian_sync/prompts/summarize.md
+
+creators:
+  - key: sample_creator
+    name: 示例博主
+    url: https://www.douyin.com/user/REPLACE_WITH_CREATOR_ID
+    enabled: false
+    tags:
+      - douyin
+      - 口播

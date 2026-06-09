@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Douyin Local Collector",
+  "version": "1.0.0",
+  "description": "Collect loaded Douyin video URLs and send them to the local private downloader.",
+  "permissions": ["activeTab", "storage", "downloads"],
+  "host_permissions": [
+    "https://www.douyin.com/*",
+    "https://v.douyin.com/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "action": {
+    "default_title": "Douyin Local Collector",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.douyin.com/*", "https://v.douyin.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

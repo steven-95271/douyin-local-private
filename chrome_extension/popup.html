@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Douyin Local Collector</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>抖音本地收集</h1>
+        <span id="count">0</span>
+      </header>
+
+      <section class="controls">
+        <button id="collect">收集已加载链接</button>
+        <button id="scrollCollect">慢速滚动收集</button>
+      </section>
+
+      <section class="options">
+        <label>
+          <span>滚动轮数</span>
+          <input id="rounds" type="number" min="1" max="80" value="12">
+        </label>
+        <label>
+          <span>水印</span>
+          <select id="watermark">
+            <option value="keep">保留</option>
+            <option value="remove">移除</option>
+          </select>
+        </label>
+        <label class="check">
+          <input id="start" type="checkbox">
+          <span>发送后启动下载</span>
+        </label>
+        <label class="check">
+          <input id="includeImages" type="checkbox">
+          <span>包含图集</span>
+        </label>
+      </section>
+
+      <section class="controls">
+        <button id="send">发送到本地</button>
+        <button id="export">导出 TXT</button>
+      </section>
+
+      <textarea id="urls" spellcheck="false" placeholder="收集到的链接会显示在这里"></textarea>
+      <p id="status"></p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
