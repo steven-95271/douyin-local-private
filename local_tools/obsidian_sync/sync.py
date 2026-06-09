@@ -473,7 +473,7 @@ def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: s
 
 def output_path_for_video(base_dir: Path, video: CreatorVideo) -> Path:
     date_prefix = format_date(video.create_time)
-    filename = safe_filename(f"{date_prefix}-{video.creator_name}-{video.title}-{video.video_id}") + ".md"
+    filename = safe_filename(f"{video.title}-{video.creator_name}-{date_prefix}-{video.video_id}") + ".md"
     return base_dir / safe_filename(video.creator_name, 40) / filename
 
 
