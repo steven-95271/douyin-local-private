@@ -3,21 +3,21 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Douyin Obsidian Sync</title>
+    <title>Content Obsidian Sync</title>
     <link rel="stylesheet" href="/app.css">
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">D</div>
+          <div class="brand-mark">C</div>
           <div>
-            <h1>Douyin Sync</h1>
+            <h1>Content Sync</h1>
             <p>Obsidian 知识库</p>
           </div>
         </div>
         <nav>
-          <a href="#creators" class="active">博主</a>
+          <a href="#creators" class="active">来源</a>
           <a href="#settings">设置</a>
           <a href="#run">运行</a>
           <a href="#history">记录</a>
@@ -28,11 +28,12 @@
       <main>
         <header class="topbar">
           <div>
-            <h2>本地同步面板</h2>
+            <h2>本地内容同步面板</h2>
             <p id="subtitle">127.0.0.1 本机运行</p>
           </div>
           <div class="status-row">
-            <span id="cookieBadge" class="badge">Cookie</span>
+            <span id="douyinCookieBadge" class="badge">抖音 Cookie</span>
+            <span id="weiboCookieBadge" class="badge">微博 Cookie</span>
             <span id="keyBadge" class="badge">DeepSeek</span>
             <span id="workerBadge" class="badge">Idle</span>
           </div>
@@ -41,20 +42,30 @@
         <section id="creators" class="panel">
           <div class="panel-head">
             <div>
-              <h3>博主库</h3>
-              <p>已启用博主默认折叠显示；新增或编辑时展开对应卡片。</p>
+              <h3>内容源库</h3>
+              <p>抖音来源可直接抓取；微博、YouTube、B站先作为来源档案预留，抓取适配器后续接入。</p>
             </div>
-            <button id="addCreator" type="button">添加博主</button>
+            <button id="addCreator" type="button">添加内容源</button>
           </div>
           <div class="creator-toolbar">
-            <label>搜索博主
-              <input id="creatorSearch" type="search" placeholder="按名称、分类、标签或 URL 搜索">
+            <label>平台筛选
+              <select id="platformFilter">
+                <option value="all">全部平台</option>
+                <option value="douyin">抖音</option>
+                <option value="weibo">微博</option>
+                <option value="youtube">YouTube</option>
+                <option value="bilibili">B站</option>
+                <option value="tiktok">TikTok</option>
+              </select>
             </label>
-            <span id="creatorCount" class="badge">0 个博主</span>
+            <label>搜索内容源
+              <input id="creatorSearch" type="search" placeholder="按名称、平台、分类、标签或 URL 搜索">
+            </label>
+            <span id="creatorCount" class="badge">0 个来源</span>
           </div>
           <div id="creatorList" class="creator-list"></div>
           <div class="panel-actions">
-            <button id="saveCreators" type="button">保存博主配置</button>
+            <button id="saveCreators" type="button">保存内容源配置</button>
           </div>
         </section>
 
@@ -70,10 +81,20 @@
             <button id="saveSettings" type="button">保存输出设置</button>
           </div>
           <div>
-            <h3>密钥</h3>
+            <h3>账号与模型</h3>
+            <div class="account-list">
+              <div>
+                <strong>抖音</strong>
+                <span id="douyinAccountText">通过 Chrome 插件导入 Cookie</span>
+              </div>
+              <div>
+                <strong>微博</strong>
+                <span id="weiboAccountText">待接入 Cookie 导入与抓取适配器</span>
+              </div>
+            </div>
             <p>抖音 Cookie 默认通过 Chrome 插件导入。插件目录：/Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private/chrome_extension</p>
             <details class="manual-cookie">
-              <summary>手动粘贴 Cookie 备用</summary>
+              <summary>抖音 Cookie 手动备用</summary>
               <label>抖音 Cookie
                 <textarea id="cookieInput" rows="4" placeholder="粘贴抖音网页版 Cookie"></textarea>
               </label>
@@ -87,11 +108,11 @@
 
         <section id="run" class="panel">
           <div class="panel-head">
-            <h3>同步任务</h3>
+            <h3>抓取中心</h3>
             <button id="refresh" type="button">刷新状态</button>
           </div>
           <div class="run-grid">
-            <label>指定博主
+            <label>指定内容源
               <select id="runCreator"></select>
             </label>
             <label class="check">
@@ -100,14 +121,15 @@
             </label>
           </div>
           <div class="panel-actions">
-            <button id="startRun" type="button">启动任务</button>
-            <button id="runAllCreators" type="button">串行跑所有启用博主</button>
-            <button id="crawlCreatorAll" type="button">全量抓取该博主</button>
+            <button id="startRun" type="button">同步选中来源</button>
+            <button id="runAllCreators" type="button">同步所有可抓取来源</button>
+            <button id="crawlCreatorAll" type="button">全量抓取该来源</button>
             <button id="stopRun" type="button" class="secondary">停止任务</button>
             <button id="notifyPermission" type="button" class="secondary">允许完成提醒</button>
             <button id="openOutput" type="button" class="secondary">打开输出目录</button>
             <button id="openLog" type="button" class="secondary">打开日志</button>
           </div>
+          <p class="run-note">当前可抓取平台：抖音。微博、YouTube、B站、TikTok 来源会保存在内容源库中，暂不进入同步队列。</p>
           <div id="progressBox" class="progress-box">
             <div class="progress-head">
               <strong id="progressLabel">暂无进度</strong>

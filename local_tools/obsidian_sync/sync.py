@@ -41,6 +41,7 @@ from local_tools.batch_download import (  # noqa: E402
 
 
 VIDEO_TYPES = {0, 4, 51, 55, 58, 61}
+RUNNABLE_PLATFORMS = {"douyin"}
 WHISPER_MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
 WHISPER_MODEL_LOCK = threading.Lock()
 
@@ -55,6 +56,7 @@ class CreatorVideo:
     create_time: Optional[int]
     raw: Dict[str, Any]
     tags: List[str]
+    platform: str = "douyin"
 
 
 def utc_now() -> str:
@@ -86,6 +88,25 @@ def load_env_file(path: Path) -> None:
         value = value.strip().strip("'\"")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def infer_platform_from_url(url: str) -> str:
+    text = str(url or "").lower()
+    if "weibo.com" in text:
+        return "weibo"
+    if "youtube.com" in text or "youtu.be" in text:
+        return "youtube"
+    if "bilibili.com" in text or "b23.tv" in text:
+        return "bilibili"
+    if "tiktok.com" in text:
+        return "tiktok"
+    return "douyin"
+
+
+def creator_platform(creator: Dict[str, Any]) -> str:
+    raw = str(creator.get("platform") or "").strip().lower()
+    inferred = infer_platform_from_url(str(creator.get("url") or ""))
+    return inferred if inferred != "douyin" and raw in {"", "douyin"} else (raw or inferred)
 
 
 def cookie_profile_path(config: Dict[str, Any], creator: Optional[Dict[str, Any]] = None) -> Path:
@@ -514,6 +535,7 @@ def aweme_to_video(creator: Dict[str, Any], item: Dict[str, Any]) -> Optional[Cr
         create_time=create_time,
         raw=item,
         tags=[str(tag) for tag in tags],
+        platform=creator_platform(creator),
     )
 
 
@@ -664,26 +686,52 @@ def transcribe_audio(audio_path: Path, cfg: Dict[str, Any]) -> str:
     return transcript
 
 
+def summary_prompt_path(video: CreatorVideo, cfg: Dict[str, Any]) -> Path:
+    prompts = cfg.get("prompts") or cfg.get("prompt_by_platform") or {}
+    if isinstance(prompts, dict):
+        platform_prompt = prompts.get(video.platform)
+        if platform_prompt:
+            return project_path(str(platform_prompt))
+    if video.platform == "weibo":
+        return project_path(str(cfg.get("weibo_prompt", "local_tools/obsidian_sync/prompts/weibo_summarize.md")))
+    return project_path(str(cfg.get("prompt", "local_tools/obsidian_sync/prompts/summarize.md")))
+
+
+def summary_user_content(video: CreatorVideo, transcript: str) -> str:
+    published = format_date(video.create_time)
+    if video.platform == "weibo":
+        return (
+            "微博元数据：\n"
+            f"- 作者：{video.creator_name}\n"
+            f"- 标题/首句：{video.title}\n"
+            f"- 链接：{video.source_url}\n"
+            f"- 发布时间：{published}\n\n"
+            "微博原文：\n"
+            f"{transcript}"
+        )
+    return (
+        "视频元数据：\n"
+        f"- 博主：{video.creator_name}\n"
+        f"- 标题/描述：{video.title}\n"
+        f"- 链接：{video.source_url}\n"
+        f"- 发布时间：{published}\n\n"
+        "逐字稿：\n"
+        f"{transcript}"
+    )
+
+
 def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> str:
     api_key_env = str(cfg.get("api_key_env", "DEEPSEEK_API_KEY"))
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"Missing {api_key_env}. Put it in local_tools/obsidian_sync/.env.")
 
-    prompt_path = project_path(str(cfg.get("prompt", "local_tools/obsidian_sync/prompts/summarize.md")))
+    prompt_path = summary_prompt_path(video, cfg)
     system_prompt = prompt_path.read_text(encoding="utf-8")
     base_url = str(cfg.get("base_url", "https://api.deepseek.com")).rstrip("/")
     endpoint = f"{base_url}/chat/completions"
 
-    user_content = (
-        "视频元数据：\n"
-        f"- 博主：{video.creator_name}\n"
-        f"- 标题/描述：{video.title}\n"
-        f"- 链接：{video.source_url}\n"
-        f"- 发布时间：{format_date(video.create_time)}\n\n"
-        "逐字稿：\n"
-        f"{transcript}"
-    )
+    user_content = summary_user_content(video, transcript)
 
     payload: Dict[str, Any] = {
         "model": str(cfg.get("model", "deepseek-v4-flash")),
@@ -718,14 +766,17 @@ def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, A
     return str(content).strip()
 
 
-def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+def build_frontmatter(video: CreatorVideo, status: str) -> str:
     tag_lines = "\n".join(f"  - {tag}" for tag in video.tags)
-    frontmatter = (
+    id_field = "post_id" if video.platform == "weibo" else "video_id"
+    author_field = "author" if video.platform == "weibo" else "creator"
+    author_key_field = "author_key" if video.platform == "weibo" else "creator_key"
+    return (
         "---\n"
-        "source: douyin\n"
-        f"creator: {format_frontmatter_value(video.creator_name)}\n"
-        f"creator_key: {format_frontmatter_value(video.creator_key)}\n"
-        f"video_id: {format_frontmatter_value(video.video_id)}\n"
+        f"source: {format_frontmatter_value(video.platform)}\n"
+        f"{author_field}: {format_frontmatter_value(video.creator_name)}\n"
+        f"{author_key_field}: {format_frontmatter_value(video.creator_key)}\n"
+        f"{id_field}: {format_frontmatter_value(video.video_id)}\n"
         f"url: {format_frontmatter_value(video.source_url)}\n"
         f"published_at: {format_frontmatter_value(format_date(video.create_time))}\n"
         f"processed_at: {format_frontmatter_value(utc_now())}\n"
@@ -734,6 +785,10 @@ def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: s
         f"{tag_lines}\n"
         "---\n\n"
     )
+
+
+def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+    frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"抖音视频 {video.video_id}"
     return (
         frontmatter +
@@ -743,6 +798,32 @@ def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: s
         "## 逐字稿\n\n"
         f"{transcript.strip()}\n"
     )
+
+
+def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, status: str) -> str:
+    frontmatter = build_frontmatter(video, status)
+    title = video.title if video.title != video.video_id else f"微博 {format_date(video.create_time)}"
+    summary = summary.strip()
+    if not summary:
+        summary = "## 要点\n\n原文已经足够清晰，未生成额外摘要。"
+    return (
+        frontmatter +
+        f"# {title}\n\n"
+        f"[原微博]({video.source_url})\n\n"
+        "## 原文\n\n"
+        f"{original_text.strip()}\n\n"
+        f"{summary}\n\n"
+        "## 我的标注\n\n"
+        "<!-- 在这里补充自己的理解、链接或后续追踪。 -->\n\n"
+        "## 相关链接\n\n"
+        f"- 原微博：{video.source_url}\n"
+    )
+
+
+def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+    if video.platform == "weibo":
+        return build_weibo_markdown(video, summary, transcript, status)
+    return build_douyin_markdown(video, summary, transcript, status)
 
 
 def output_path_for_video(base_dir: Path, video: CreatorVideo, conn: Optional[sqlite3.Connection] = None) -> Path:
@@ -781,6 +862,18 @@ def configured_concurrency(config: Dict[str, Any], cli_value: Optional[int]) -> 
         sync_cfg = config.get("sync") if isinstance(config.get("sync"), dict) else {}
         value = int(sync_cfg.get("max_concurrency", 2))
     return max(1, min(2, value))
+
+
+def parse_video_id_filter(values: Optional[List[str]]) -> set[str]:
+    if not values:
+        return set()
+    video_ids: set[str] = set()
+    for value in values:
+        for item in str(value or "").split(","):
+            item = item.strip()
+            if item:
+                video_ids.add(item)
+    return video_ids
 
 
 async def process_video(
@@ -873,15 +966,29 @@ async def sync(args: argparse.Namespace) -> int:
     conn = sqlite3.connect(str(state_path))
     ensure_state(conn)
     run_id = str(args.run_id or default_run_id())
+    selected_video_ids = parse_video_id_filter(args.video_id)
 
     vault_path = Path(str(config["vault_path"])).expanduser()
     output_base = vault_path / str(config.get("output_subdir", "Douyin/口播博主"))
     creators = [creator for creator in config.get("creators", []) if creator.get("enabled", True)]
     if args.creator:
         creators = [creator for creator in creators if str(creator.get("key")) == args.creator]
+    skipped_platform_creators = [
+        creator for creator in creators
+        if creator_platform(creator) not in RUNNABLE_PLATFORMS
+    ]
+    for creator in skipped_platform_creators:
+        print(
+            "SKIP unsupported platform "
+            f"{creator_platform(creator)}: {creator.get('name') or creator.get('key') or creator.get('url')}"
+        )
+    creators = [
+        creator for creator in creators
+        if creator_platform(creator) in RUNNABLE_PLATFORMS
+    ]
 
     if not creators:
-        print("No enabled creators. Edit local_tools/obsidian_sync/creators.yaml first.")
+        print("No enabled runnable creators. Douyin is currently the only runnable platform.")
         return 0
 
     start_run(conn, run_id, args.creator, len(creators))
@@ -912,6 +1019,8 @@ async def sync(args: argparse.Namespace) -> int:
 
             candidates: List[CreatorVideo] = []
             for video in videos:
+                if selected_video_ids and video.video_id not in selected_video_ids:
+                    continue
                 mark_seen(conn, video)
                 status = get_status(conn, video.video_id)
                 if status == "ok" and not args.force:
@@ -990,6 +1099,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync Douyin creator videos into Obsidian Markdown notes.")
     parser.add_argument("--config", default="local_tools/obsidian_sync/creators.yaml", help="YAML config path.")
     parser.add_argument("--creator", default=None, help="Only sync one creator key.")
+    parser.add_argument("--video-id", action="append", default=None, help="Only process selected video id. Repeat or pass comma-separated ids.")
     parser.add_argument("--limit", type=int, default=0, help="Process at most N new videos per creator.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and list candidates without downloading.")
     parser.add_argument("--force", action="store_true", help="Reprocess videos already marked ok.")

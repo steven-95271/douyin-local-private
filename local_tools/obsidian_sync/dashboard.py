@@ -29,6 +29,8 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml"
+KNOWN_PLATFORMS = {"douyin", "weibo", "youtube", "bilibili", "tiktok"}
+RUNNABLE_PLATFORMS = {"douyin"}
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -171,6 +173,48 @@ def unique_creator_key(base_key: str, url: str, data: Dict[str, Any]) -> str:
     while f"{base_key}_{index}" in used and used[f"{base_key}_{index}"] != url:
         index += 1
     return f"{base_key}_{index}"
+
+
+def infer_platform_from_url(url: str) -> str:
+    text = str(url or "").lower()
+    if "weibo.com" in text:
+        return "weibo"
+    if "youtube.com" in text or "youtu.be" in text:
+        return "youtube"
+    if "bilibili.com" in text or "b23.tv" in text:
+        return "bilibili"
+    if "tiktok.com" in text:
+        return "tiktok"
+    return "douyin"
+
+
+def normalize_platform(value: Any, url: str = "") -> str:
+    raw = str(value or "").strip().lower()
+    inferred = infer_platform_from_url(url)
+    platform = inferred if inferred != "douyin" and raw in {"", "douyin"} else (raw or inferred)
+    return platform if platform in KNOWN_PLATFORMS else "douyin"
+
+
+def default_tags_for_platform(platform: str) -> list[str]:
+    defaults = {
+        "douyin": ["douyin", "口播"],
+        "weibo": ["weibo", "文字"],
+        "youtube": ["youtube", "视频"],
+        "bilibili": ["bilibili", "视频"],
+        "tiktok": ["tiktok", "视频"],
+    }
+    return defaults.get(platform, ["内容源"])
+
+
+def platform_label(platform: str) -> str:
+    labels = {
+        "douyin": "抖音",
+        "weibo": "微博",
+        "youtube": "YouTube",
+        "bilibili": "B站",
+        "tiktok": "TikTok",
+    }
+    return labels.get(platform, platform)
 
 
 def clean_creator_name(value: str) -> str:
@@ -369,6 +413,9 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("url is required")
     url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
     parsed = urlparse(url)
+    platform = normalize_platform(payload.get("platform"), url)
+    if platform != "douyin":
+        raise ValueError(f"{platform_label(platform)} 内容源可先手动保存；URL 补全和抓取适配器下一阶段接入。")
     if "douyin.com" not in parsed.netloc:
         raise ValueError("Only douyin.com creator URLs are supported")
 
@@ -421,6 +468,7 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "key": key,
+        "platform": "douyin",
         "name": name,
         "url": final_url,
         "sec_user_id": profile.get("sec_user_id", ""),
@@ -437,6 +485,15 @@ def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
     creators = data.get("creators") or []
     if not isinstance(creators, list):
         creators = []
+    public_creators = []
+    for creator in creators:
+        if not isinstance(creator, dict):
+            continue
+        item = dict(creator)
+        item["platform"] = normalize_platform(item.get("platform"), str(item.get("url", "")))
+        if not item.get("tags"):
+            item["tags"] = default_tags_for_platform(item["platform"])
+        public_creators.append(item)
     return {
         "vault_path": data.get("vault_path", ""),
         "output_subdir": data.get("output_subdir", ""),
@@ -444,21 +501,36 @@ def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
         "summary": {
             "model": (data.get("summary") or {}).get("model", ""),
         },
-        "creators": creators,
+        "creators": public_creators,
     }
 
 
 def status_payload() -> Dict[str, Any]:
     data = load_config()
     cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
+    weibo_cookie_file = project_path(str(data.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))
     env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
     api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
     vault_path = Path(str(data.get("vault_path", ""))).expanduser()
     output_dir = vault_path / str(data.get("output_subdir", ""))
+    douyin_cookie = cookie_status(cookie_file)
+    weibo_cookie = file_ready(weibo_cookie_file, ["paste_your", "PASTE_YOUR"])
     return {
         "time": utc_now(),
         "config_path": str(get_config_path()),
-        "cookie": cookie_status(cookie_file),
+        "cookie": douyin_cookie,
+        "accounts": {
+            "douyin": {
+                "label": platform_label("douyin"),
+                "runnable": "douyin" in RUNNABLE_PLATFORMS,
+                "cookie": douyin_cookie,
+            },
+            "weibo": {
+                "label": platform_label("weibo"),
+                "runnable": "weibo" in RUNNABLE_PLATFORMS,
+                "cookie": weibo_cookie,
+            },
+        },
         "deepseek": env_status(env_file, api_key_env),
         "vault": {"path": str(vault_path), "exists": vault_path.exists()},
         "output": {"path": str(output_dir), "exists": output_dir.exists()},
@@ -772,7 +844,7 @@ def read_dashboard_runs(data: Dict[str, Any], limit: int = 12) -> list[Dict[str,
                 run = dict(row)
                 item_rows = conn.execute(
                     """
-                    SELECT video_id, creator_name, title, source_url, status, stage,
+                    SELECT video_id, creator_key, creator_name, title, source_url, status, stage,
                            error, markdown_path, updated_at
                     FROM run_items
                     WHERE run_id = ?
@@ -864,19 +936,21 @@ def normalize_creator(raw: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, An
     key = str(raw.get("key", "")).strip()
     name = str(raw.get("name", "")).strip()
     url = str(raw.get("url", "")).strip()
+    platform = normalize_platform(raw.get("platform"), url)
     if not name:
         raise ValueError("Creator name is required")
     if not url:
         raise ValueError(f"Creator URL is required for {name}")
     if not key:
         key = unique_creator_key(pinyin_initials(name), url, data)
-    tags = raw.get("tags") or ["douyin", "口播"]
+    tags = raw.get("tags") or default_tags_for_platform(platform)
     if isinstance(tags, str):
         tags = [tag.strip() for tag in tags.split(",") if tag.strip()]
     if not isinstance(tags, list):
-        tags = ["douyin", "口播"]
+        tags = default_tags_for_platform(platform)
     creator = {
         "key": key,
+        "platform": platform,
         "name": name,
         "url": url,
         "enabled": bool(raw.get("enabled", True)),
@@ -889,6 +963,9 @@ def normalize_creator(raw: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, An
     sec_user_id = str(raw.get("sec_user_id", "")).strip()
     if sec_user_id:
         creator["sec_user_id"] = sec_user_id
+    cookie_profile = str(raw.get("cookie_profile", "")).strip()
+    if cookie_profile:
+        creator["cookie_profile"] = cookie_profile
     return creator
 
 
@@ -920,6 +997,37 @@ def save_secrets(payload: Dict[str, Any]) -> Dict[str, Any]:
         api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
         update_env_value(env_file, api_key_env, api_key)
     return status_payload()
+
+
+def failed_run_items(data: Dict[str, Any], run_id: str = "") -> tuple[str, list[Dict[str, Any]]]:
+    state_path = configured_state_path(data)
+    if not state_path.exists():
+        return "", []
+    with sqlite3.connect(str(state_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        selected_run_id = run_id.strip()
+        if not selected_run_id:
+            row = conn.execute(
+                """
+                SELECT run_id
+                FROM runs
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            selected_run_id = str(row["run_id"]) if row else ""
+        if not selected_run_id:
+            return "", []
+        rows = conn.execute(
+            """
+            SELECT video_id, creator_key, creator_name, title, source_url, error
+            FROM run_items
+            WHERE run_id = ? AND status = 'failed'
+            ORDER BY updated_at ASC, video_id ASC
+            """,
+            (selected_run_id,),
+        ).fetchall()
+        return selected_run_id, [dict(row) for row in rows]
 
 
 def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -961,6 +1069,60 @@ def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         log.flush()
         worker_process = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=log, stderr=log)
     return worker_status()
+
+
+def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
+    global worker_process, worker_log, worker_run_id
+    if worker_process and worker_process.poll() is None:
+        raise RuntimeError("A sync process is already running")
+
+    data = load_config()
+    source_run_id = str(payload.get("run_id", "")).strip()
+    resolved_run_id, items = failed_run_items(data, source_run_id)
+    if not items:
+        raise ValueError("最近一次任务没有失败视频可重爬")
+
+    video_ids = sorted({str(item.get("video_id", "")).strip() for item in items if item.get("video_id")})
+    creator_keys = sorted({str(item.get("creator_key", "")).strip() for item in items if item.get("creator_key")})
+    if not video_ids:
+        raise ValueError("失败记录里没有可重爬的视频 ID")
+
+    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    log_dir = work_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    worker_log = log_dir / "dashboard_sync.log"
+    worker_run_id = "retry_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    cmd = [
+        sys.executable,
+        "-u",
+        str(PROJECT_ROOT / "local_tools" / "obsidian_sync" / "sync.py"),
+        "--config",
+        str(get_config_path()),
+        "--run-id",
+        worker_run_id,
+        "--video-id",
+        ",".join(video_ids),
+    ]
+    if len(creator_keys) == 1:
+        cmd.extend(["--creator", creator_keys[0]])
+    if payload.get("force", True):
+        cmd.append("--force")
+
+    with worker_log.open("a", encoding="utf-8") as log:
+        log.write(
+            f"\n[{utc_now()}] RETRY_FAILED source_run={resolved_run_id} "
+            f"count={len(video_ids)} {worker_run_id} {' '.join(cmd)}\n"
+        )
+        log.flush()
+        worker_process = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=log, stderr=log)
+    status = worker_status()
+    status["retry"] = {
+        "source_run_id": resolved_run_id,
+        "video_count": len(video_ids),
+        "creator_count": len(creator_keys),
+    }
+    return status
 
 
 def stop_sync() -> Dict[str, Any]:
@@ -1070,6 +1232,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "creator": resolve_creator_from_url(payload)})
             elif path == "/api/run":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_sync(payload)})
+            elif path == "/api/run/retry-failed":
+                self.send_json(HTTPStatus.OK, {"ok": True, "worker": retry_failed_items(payload)})
             elif path == "/api/run/stop":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": stop_sync()})
             elif path == "/api/open":

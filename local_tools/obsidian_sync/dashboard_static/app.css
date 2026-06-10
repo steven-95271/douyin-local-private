@@ -207,6 +207,11 @@ button.secondary {
   background: #fff;
 }
 
+button.small {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
 button:hover {
   filter: brightness(0.92);
 }
@@ -218,7 +223,7 @@ button:hover {
 
 .creator-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: 180px minmax(220px, 1fr) auto;
   gap: 10px;
   align-items: end;
   margin-bottom: 12px;
@@ -236,14 +241,14 @@ button:hover {
 
 .creator-summary {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.2fr) auto;
+  grid-template-columns: 72px minmax(150px, 1fr) minmax(180px, 1.2fr) auto auto;
   gap: 10px;
   align-items: center;
   padding: 10px;
   cursor: pointer;
 }
 
-.creator-summary span:first-child {
+.creator-summary [data-summary="name"] {
   color: var(--text);
   font-weight: 600;
 }
@@ -256,9 +261,38 @@ button:hover {
   white-space: nowrap;
 }
 
+.platform-pill {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d7d7d0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #222;
+  background: #fff;
+  font-size: 12px;
+}
+
+.platform-pill.douyin {
+  border-color: #b9d8c8;
+  color: var(--ok);
+}
+
+.platform-pill.weibo {
+  border-color: #e0c697;
+  color: var(--warn);
+}
+
+.platform-pill.youtube,
+.platform-pill.tiktok,
+.platform-pill.bilibili {
+  color: var(--muted);
+}
+
 .creator-fields {
   display: grid;
-  grid-template-columns: 150px minmax(220px, 1.3fr) 120px 90px 110px 72px minmax(160px, 1fr) 92px 72px;
+  grid-template-columns: 110px 150px minmax(220px, 1.3fr) 120px 90px 110px 96px 72px minmax(160px, 1fr) 92px 72px;
   gap: 8px;
   align-items: end;
   border-top: 1px solid #ecece7;
@@ -290,6 +324,37 @@ button:hover {
   gap: 8px;
   margin-top: 12px;
   flex-wrap: wrap;
+}
+
+.account-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.account-list > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fbfbf8;
+}
+
+.account-list strong {
+  color: var(--text);
+}
+
+.account-list span,
+.run-note {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-note {
+  margin-top: 10px;
 }
 
 .progress-box {
@@ -421,6 +486,16 @@ button:hover {
   gap: 6px;
 }
 
+.run-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.run-actions:empty {
+  display: none;
+}
+
 .history-reasons em {
   color: var(--muted);
   font-size: 12px;
@@ -439,6 +514,10 @@ button:hover {
 .run-items,
 .history-archive {
   margin-top: 8px;
+}
+
+.run-items.folded {
+  opacity: 0.9;
 }
 
 .run-items summary,
@@ -565,6 +644,7 @@ pre {
   .creator-toolbar,
   .creator-summary,
   .creator-fields,
+  .account-list > div,
   .history-metrics,
   .run-item {
     grid-template-columns: 1fr;
