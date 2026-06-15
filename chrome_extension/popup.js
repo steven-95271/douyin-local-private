@@ -5,6 +5,7 @@ const els = {
   send: document.getElementById("send"),
   export: document.getElementById("export"),
   importCookie: document.getElementById("importCookie"),
+  importWeiboCookie: document.getElementById("importWeiboCookie"),
   openDashboard: document.getElementById("openDashboard"),
   urls: document.getElementById("urls"),
   status: document.getElementById("status"),
@@ -154,11 +155,63 @@ async function getDouyinCookies() {
   };
 }
 
-async function importCookieToDashboard() {
-  setStatus("读取抖音 Cookie...");
-  const cookie = await getDouyinCookies();
+async function getWeiboCookies() {
+  const batches = await Promise.all([
+    getCookiesForUrl("https://weibo.com/"),
+    getCookiesForUrl("https://www.weibo.com/"),
+    getCookiesForUrl("https://passport.weibo.com/"),
+    getCookiesForDomain(".weibo.com"),
+    getCookiesForDomain("weibo.com"),
+    getCookiesForUrl("https://m.weibo.cn/"),
+    getCookiesForDomain(".weibo.cn"),
+    getCookiesForDomain("m.weibo.cn"),
+    getCookiesForUrl("https://passport.sina.com.cn/"),
+    getCookiesForDomain(".sina.com.cn"),
+  ]);
+
+  const cookiePriority = (cookie) => {
+    const domain = String(cookie.domain || "").toLowerCase();
+    const normalized = domain.replace(/^\./, "");
+    if (normalized === "weibo.com") return 5;
+    if (normalized === "www.weibo.com") return 4;
+    if (normalized === "m.weibo.cn" || normalized === "weibo.cn") return 3;
+    if (normalized === "passport.weibo.com") return 2;
+    if (domain.endsWith("sina.com.cn") || domain.endsWith("sina.cn")) return 1;
+    return 0;
+  };
+  const byName = new Map();
+  for (const cookie of batches.flat()) {
+    if (!cookie.name || !cookie.value) continue;
+    const existing = byName.get(cookie.name);
+    const candidate = {
+      value: cookie.value,
+      domain: cookie.domain || "",
+      priority: cookiePriority(cookie),
+    };
+    if (!existing || candidate.priority > existing.priority) {
+      byName.set(cookie.name, candidate);
+    }
+  }
+  const cookies = Array.from(byName.entries())
+    .sort(([nameA], [nameB]) => nameA.localeCompare(nameB))
+    .map(([name, item]) => `${name}=${item.value}`);
+  const names = Array.from(byName.keys()).sort();
+  const domains = uniq(Array.from(byName.values()).map((item) => item.domain).filter(Boolean)).sort();
+  return {
+    header: cookies.join("; "),
+    count: cookies.length,
+    names,
+    domains,
+    hasLogin: byName.has("SUB") || byName.has("SUBP") || byName.has("SSOLoginState") || byName.has("ALF"),
+  };
+}
+
+async function importCookieToDashboard(platform = "douyin") {
+  const isWeibo = platform === "weibo";
+  setStatus(`读取${isWeibo ? "微博" : "抖音"} Cookie...`);
+  const cookie = isWeibo ? await getWeiboCookies() : await getDouyinCookies();
   if (!cookie.header) {
-    setStatus("没有读到 Cookie，请先在 Chrome 登录 douyin.com");
+    setStatus(`没有读到 Cookie，请先在 Chrome 登录 ${isWeibo ? "weibo.com" : "douyin.com"}`);
     return;
   }
 
@@ -166,13 +219,14 @@ async function importCookieToDashboard() {
   const response = await fetch("http://127.0.0.1:8787/api/secrets", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ douyin_cookie: cookie.header })
+    body: JSON.stringify(isWeibo ? { weibo_cookie: cookie.header } : { douyin_cookie: cookie.header })
   });
   if (!response.ok) {
     throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
   }
   const names = cookie.names.slice(0, 8).join(", ");
-  setStatus(`抖音 Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}。${names}`);
+  const domains = cookie.domains && cookie.domains.length ? `；域：${cookie.domains.slice(0, 4).join(", ")}` : "";
+  setStatus(`${isWeibo ? "微博" : "抖音"} Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}。${names}${domains}`);
 }
 
 function openDashboard() {
@@ -183,7 +237,8 @@ els.collect.addEventListener("click", () => collect(false).catch((error) => setS
 els.scrollCollect.addEventListener("click", () => collect(true).catch((error) => setStatus(String(error.message || error))));
 els.send.addEventListener("click", () => sendToLocal().catch((error) => setStatus(String(error.message || error))));
 els.export.addEventListener("click", exportTxt);
-els.importCookie.addEventListener("click", () => importCookieToDashboard().catch((error) => setStatus(String(error.message || error))));
+els.importCookie.addEventListener("click", () => importCookieToDashboard("douyin").catch((error) => setStatus(String(error.message || error))));
+els.importWeiboCookie.addEventListener("click", () => importCookieToDashboard("weibo").catch((error) => setStatus(String(error.message || error))));
 els.openDashboard.addEventListener("click", openDashboard);
 
 chrome.storage.local.get({ urls: [] }, (data) => render(data.urls || []));

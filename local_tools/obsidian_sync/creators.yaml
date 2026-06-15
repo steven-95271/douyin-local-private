@@ -4,17 +4,14 @@ state_db: local_tools/obsidian_sync/state.sqlite
 work_dir: local_tools/obsidian_sync/work
 env_file: local_tools/obsidian_sync/.env
 douyin_cookie_file: local_tools/douyin_cookie.txt
-
 fetch:
   count_per_page: 20
-  max_pages: 2
+  max_pages: 50
   delay_seconds: 2
-
 download:
   watermark: keep
   timeout_seconds: 120
   cleanup_media: true
-
 transcribe:
   provider: faster_whisper
   model: small
@@ -22,7 +19,6 @@ transcribe:
   compute_type: int8
   language: zh
   vad_filter: true
-
 summary:
   provider: deepseek
   api_key_env: DEEPSEEK_API_KEY
@@ -32,12 +28,188 @@ summary:
   temperature: 0.2
   max_tokens: 5000
   prompt: local_tools/obsidian_sync/prompts/summarize.md
-
+podcast_transcribe:
+  language: auto
+podcast_summary:
+  model: deepseek-v4-pro
+  max_tokens: 9000
+  chunk_chars: 45000
+  chunk_max_tokens: 2500
+  podcast_prompt: local_tools/obsidian_sync/prompts/podcast_summarize.md
+creative:
+  model: deepseek-v4-pro
+  temperature: 0.45
+  max_tokens: 7000
+  max_scan: 300
+  excerpt_chars: 4500
+weekly_report:
+  output_subdir: Douyin/周报
+  telegram:
+    max_creators: 8
+    max_items_per_creator: 3
+    title_chars: 72
+    summary_chars: 80
+    max_chars: 3500
+  hermes:
+    enabled: true
+    profile: telegram2
+    timeout_seconds: 120
 creators:
-  - key: sample_creator
-    name: 示例博主
-    url: https://www.douyin.com/user/REPLACE_WITH_CREATOR_ID
-    enabled: false
-    tags:
-      - douyin
-      - 口播
+- key: bgrj
+  platform: douyin
+  name: 波咕日记
+  url: https://www.douyin.com/user/MS4wLjABAAAAsbuk1DTYOxufXG-EVspaxEbsnPPzO5cl1BCeGzO-mrc?from_tab_name=main
+  enabled: true
+  tags:
+  - 投资
+  - 商业
+  - 个人成长
+  - 认知
+  - 思维
+  - 巴菲特
+  - 查理芒格
+  - 自我提升
+  category: 知识分享
+  language: 中文
+  content_type: 口播
+  sec_user_id: MS4wLjABAAAAsbuk1DTYOxufXG-EVspaxEbsnPPzO5cl1BCeGzO-mrc
+- key: bgskbj
+  platform: douyin
+  name: 波咕思考笔记
+  url: https://www.douyin.com/user/MS4wLjABAAAA9jygD9yP32iquqoqgdxHEAI1nb6jqmXm5pwbSl8ePz94eKiN5l3AQl2P9W_CeGyL?from_tab_name=main
+  enabled: true
+  tags:
+  - 商业分析
+  - 投资理财
+  - 价值投资
+  - 商业案例
+  - 企业家访谈
+  - 深度解读
+  - 思维模型
+  category: 商业知识分享
+  language: 中文
+  content_type: 混合
+  sec_user_id: MS4wLjABAAAA9jygD9yP32iquqoqgdxHEAI1nb6jqmXm5pwbSl8ePz94eKiN5l3AQl2P9W_CeGyL
+- key: csyyazlt
+  platform: douyin
+  name: 陈石（营养，挨揍，撸铁）
+  url: https://www.douyin.com/user/MS4wLjABAAAAoAQuW-t3qvqgAdcwyVorpcjanqw5m53NY2rANWYvwdvK6eSrviH0qzARzcljcADw?from_tab_name=main
+  enabled: true
+  tags:
+  - 营养
+  - 健身
+  - 减脂
+  - 减肥
+  - 健康饮食
+  - 撸铁
+  - 女性健康
+  - 科普
+  category: 健身营养科普
+  language: 中文
+  content_type: 混合
+  sec_user_id: MS4wLjABAAAAoAQuW-t3qvqgAdcwyVorpcjanqw5m53NY2rANWYvwdvK6eSrviH0qzARzcljcADw
+- key: lz
+  platform: douyin
+  name: 李真OpenTalk
+  url: https://www.douyin.com/user/MS4wLjABAAAAEWNXBBQj8KP3YpmZx8e9F3T7Vpp_xE9-aXwas0UB2fQ?from_tab_name=main
+  enabled: true
+  tags:
+  - 财经
+  - 投资
+  - 科技
+  - AI
+  - 商业分析
+  - 知识分享
+  - 创新
+  - 深度思考
+  category: 财经科技评论
+  language: 中文
+  content_type: 口播
+  sec_user_id: MS4wLjABAAAAEWNXBBQj8KP3YpmZx8e9F3T7Vpp_xE9-aXwas0UB2fQ
+- key: xldzh
+  platform: douyin
+  name: 小雷大智慧
+  url: https://www.douyin.com/user/MS4wLjABAAAAH3iyVtQzOAPLBEM5K6VF1Es9hQZK7GRkP19hd7m7dYc?from_tab_name=main
+  enabled: true
+  tags:
+  - 财经
+  - 财报
+  - 金融
+  - 投资
+  - 经济学
+  - 知识科普
+  - 系统性学习
+  category: 财经知识
+  language: 中文
+  content_type: 口播
+  sec_user_id: MS4wLjABAAAAH3iyVtQzOAPLBEM5K6VF1Es9hQZK7GRkP19hd7m7dYc
+- key: rxf
+  platform: douyin
+  name: 阮小飞
+  url: https://www.douyin.com/user/MS4wLjABAAAA6z8MyjGF4DQWzTIYW3jVah9smfY8kz5jyaCCoA-sGus?from_tab_name=main
+  enabled: true
+  tags:
+  - 经验分享
+  - 创业
+  - 政策解读
+  - 风险意识
+  - 国际局势
+  - 个人成长
+  - 奋斗
+  category: 知识分享
+  language: 中文
+  content_type: 口播
+  sec_user_id: MS4wLjABAAAA6z8MyjGF4DQWzTIYW3jVah9smfY8kz5jyaCCoA-sGus
+- key: xbdnf
+  platform: weibo
+  name: 小北带你飞
+  url: https://weibo.com/u/1660737882
+  enabled: true
+  tags:
+  - 创业
+  - 赚钱
+  - 自媒体
+  - 电商
+  - AI
+  - 跨境
+  - 社群
+  - 个人IP
+  category: 创业经验分享
+  language: 中文
+  content_type: 混合
+  bio: 创业15年，白手起家，做跨境，电商，自媒体，我把一路血泪经验，掏心掏肺告诉你！公号：小北的梦呓
+  platform_id: '1660737882'
+  weibo_uid: '1660737882'
+  weibo_custom: u/1660737882
+- key: zxs
+  platform: xiaoyuzhou
+  name: 自习室 STUDY ROOM
+  url: https://www.xiaoyuzhoufm.com/podcast/65a5fb7540d4ef949c0140ac
+  enabled: true
+  tags:
+  - 个人成长
+  - 心理学
+  - 运动健康
+  - 读书
+  - 情绪管理
+  - 沟通
+  - 人物故事
+  - 抗逆力
+  category: 个人成长与心理
+  language: 中文
+  content_type: 混合
+  bio: '【自习室 STUDYROOM 】是两位铁三卷王的成长能量站。 我们聊运动，更拆解运动对精神和心理的重塑； 我们聊人物，聊人性的幽微，也聊超越生命的人格；
+    我们聊读书，更聊如何打破书与生活的界限，用阅读和思考改变生活、创造生活。 我们在自习室剖析自我，在人生的一个个挑战面前寻找方法、爆发能量、总结经验。 我们永远在探索生命的可能性，也永远相信进步是最性感的事！
+    【视频播客】 Weibo@播客_自习室STUDYROOM 小红书@自习室STUDYROOM B站、YouTube、抖音、视频号： @自习室STUDYROOM
+    【音频平台】 苹果Podcast、小宇宙、喜马拉雅、网易云音乐、Spotify、豆瓣： @自习室STUDYROOM 【进群】 「花卷」听友群 VX: studyroom8888
+    【合作】 商务联系 studyroom@fit4life.world'
+  platform_id: 65a5fb7540d4ef949c0140ac
+  xiaoyuzhou_pid: 65a5fb7540d4ef949c0140ac
+output_subdirs:
+  douyin: Douyin/口播博主
+  weibo: Weibo/内容源
+  xiaoyuzhou: Podcast/小宇宙
+  wechat: WeChat/公众号
+  youtube: YouTube/视频博主
+  bilibili: Bilibili/视频博主
+  tiktok: TikTok/视频博主

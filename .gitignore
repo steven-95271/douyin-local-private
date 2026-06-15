@@ -6,6 +6,9 @@ __pycache__/
 # Local secrets and generated sync state
 .env
 local_tools/douyin_cookie.txt
+local_tools/douyin_cookie_*.txt
+local_tools/weibo_cookie.txt
+local_tools/weibo_cookie_*.txt
 local_tools/urls.txt
 local_tools/extension_queue.txt
 local_tools/obsidian_sync/.env

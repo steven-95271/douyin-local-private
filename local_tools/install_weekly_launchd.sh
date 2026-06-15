@@ -12,9 +12,17 @@ unload_label() {
   rm -f "$plist"
 }
 
+xml_escape() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  printf '%s' "$value"
+}
+
 install_job() {
   local label="$1"
-  local script="$2"
+  local command="$2"
   local weekday="$3"
   local hour="$4"
   local minute="$5"
@@ -22,7 +30,8 @@ install_job() {
   local err_log="$7"
   local plist="$HOME/Library/LaunchAgents/${label}.plist"
 
-  chmod +x "$script"
+  local escaped_command
+  escaped_command="$(xml_escape "$command")"
   cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,10 +41,10 @@ install_job() {
   <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${script}</string>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>${escaped_command}</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>$(pwd)</string>
   <key>StartCalendarInterval</key>
   <dict>
     <key>Weekday</key>
@@ -63,16 +72,19 @@ PLIST
 unload_label "local.douyin-obsidian-weekly"
 
 root="$(pwd)"
+content_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC START\"; .venv/bin/python local_tools/obsidian_sync/sync.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC DONE\"; } >> local_tools/obsidian_sync/work/logs/weekly_content_sync.log 2>&1"
+brief_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF START\"; .venv/bin/python local_tools/obsidian_sync/weekly_brief.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF DONE\"; } >> local_tools/obsidian_sync/work/logs/weekly_brief.log 2>&1"
+
 install_job \
   "local.douyin-obsidian-content-sync" \
-  "${root}/local_tools/run_weekly_content_sync.sh" \
+  "${content_command}" \
   0 22 0 \
   "${root}/local_tools/obsidian_sync/work/logs/weekly_content_launchd.out.log" \
   "${root}/local_tools/obsidian_sync/work/logs/weekly_content_launchd.err.log"
 
 install_job \
   "local.douyin-obsidian-weekly-brief" \
-  "${root}/local_tools/run_weekly_brief.sh" \
+  "${brief_command}" \
   1 11 0 \
   "${root}/local_tools/obsidian_sync/work/logs/weekly_brief_launchd.out.log" \
   "${root}/local_tools/obsidian_sync/work/logs/weekly_brief_launchd.err.log"

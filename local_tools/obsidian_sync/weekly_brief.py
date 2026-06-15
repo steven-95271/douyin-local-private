@@ -91,6 +91,13 @@ def first_paragraph(text: str, limit: int = 220) -> str:
     return compact[:limit].rstrip() + "..."
 
 
+def truncate_text(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
 def bullets(text: str, limit: int = 5) -> List[str]:
     items = []
     for raw in text.splitlines():
@@ -202,21 +209,37 @@ def build_markdown(videos: List[ProcessedVideo], since: datetime, until: datetim
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_telegram_text(videos: List[ProcessedVideo], since: datetime, until: datetime) -> str:
+def build_telegram_text(
+    videos: List[ProcessedVideo],
+    since: datetime,
+    until: datetime,
+    config: Optional[Dict[str, Any]] = None,
+) -> str:
+    report_cfg = (config or {}).get("weekly_report", {})
+    telegram_cfg = report_cfg.get("telegram") if isinstance(report_cfg.get("telegram"), dict) else {}
+    max_creators = int(telegram_cfg.get("max_creators", 8))
+    max_items_per_creator = int(telegram_cfg.get("max_items_per_creator", 3))
+    title_chars = int(telegram_cfg.get("title_chars", 72))
+    summary_chars = int(telegram_cfg.get("summary_chars", 80))
+    max_chars = int(telegram_cfg.get("max_chars", 3500))
     header = f"抖音口播博主周报 {since.date()} - {(until - timedelta(days=1)).date()}"
     if not videos:
         return f"{header}\n\n本周没有新的已处理视频。"
     lines = [header, "", f"本周新增 {len(videos)} 条。"]
-    for creator, items in group_by_creator(videos).items():
+    grouped = sorted(group_by_creator(videos).items(), key=lambda item: len(item[1]), reverse=True)
+    for creator, items in grouped[:max_creators]:
         lines.extend(["", f"{creator}：{len(items)} 条"])
-        for idx, video in enumerate(items[:8], 1):
+        for idx, video in enumerate(items[:max_items_per_creator], 1):
             summary = video.summary or (video.points[0] if video.points else "")
-            lines.append(f"{idx}. {video.title}")
+            lines.append(f"{idx}. {truncate_text(video.title, title_chars)}")
             if summary:
-                lines.append(f"   {summary[:120]}")
-        if len(items) > 8:
-            lines.append(f"   另有 {len(items) - 8} 条见 Obsidian 完整周报。")
-    return "\n".join(lines)
+                lines.append(f"   {truncate_text(summary, summary_chars)}")
+        if len(items) > max_items_per_creator:
+            lines.append(f"   另有 {len(items) - max_items_per_creator} 条见 Obsidian 完整周报。")
+    if len(grouped) > max_creators:
+        lines.extend(["", f"另有 {len(grouped) - max_creators} 个来源见 Obsidian 完整周报。"])
+    text = "\n".join(lines)
+    return truncate_text(text, max_chars)
 
 
 def write_report(config: Dict[str, Any], markdown: str, since: datetime, until: datetime) -> Path:
@@ -243,7 +266,11 @@ def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dr
         print("HERMES DRY RUN")
         print(prompt)
         return 0
-    cmd = ["hermes", "-z", prompt]
+    cmd = ["hermes"]
+    profile = hermes_cfg.get("profile")
+    if profile:
+        cmd.extend(["--profile", str(profile)])
+    cmd.extend(["-z", prompt])
     model = hermes_cfg.get("model")
     if model:
         cmd.extend(["--model", str(model)])
@@ -251,7 +278,22 @@ def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dr
     if provider:
         cmd.extend(["--provider", str(provider)])
     print("HERMES START")
-    completed = subprocess.run(cmd, cwd=str(PROJECT_ROOT), text=True, capture_output=True, timeout=300)
+    timeout_seconds = int(hermes_cfg.get("timeout_seconds", 120))
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"HERMES TIMEOUT {timeout_seconds}s", file=sys.stderr)
+        if exc.stdout:
+            print(str(exc.stdout).strip())
+        if exc.stderr:
+            print(str(exc.stderr).strip(), file=sys.stderr)
+        return 124
     if completed.stdout.strip():
         print(completed.stdout.strip())
     if completed.stderr.strip():
@@ -291,7 +333,7 @@ def main() -> int:
     print(f"WEEKLY_REPORT {report_path}")
     print(f"WEEKLY_VIDEOS {len(videos)}")
     if not args.no_hermes:
-        text = build_telegram_text(videos, since, until)
+        text = build_telegram_text(videos, since, until, config)
         return send_with_hermes(text, report_path, config, args.dry_run)
     return 0
 

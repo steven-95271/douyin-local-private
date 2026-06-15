@@ -14,6 +14,13 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   color: var(--text);
@@ -24,7 +31,9 @@ body {
 .shell {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
+  width: 100%;
   min-height: 100vh;
+  overflow-x: hidden;
 }
 
 .sidebar {
@@ -92,7 +101,10 @@ main {
   display: grid;
   gap: 16px;
   align-content: start;
+  width: min(100%, 1480px);
+  min-width: 0;
   padding: 20px;
+  justify-self: center;
 }
 
 .topbar,
@@ -145,6 +157,7 @@ main {
 }
 
 .panel {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -219,6 +232,7 @@ button:hover {
 .creator-list {
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .creator-toolbar {
@@ -230,6 +244,7 @@ button:hover {
 }
 
 .creator-row {
+  min-width: 0;
   border: 1px solid #ecece7;
   border-radius: 8px;
   background: #fbfbf8;
@@ -284,6 +299,16 @@ button:hover {
   color: var(--warn);
 }
 
+.platform-pill.xiaoyuzhou {
+  border-color: #b9cfe0;
+  color: #286a8c;
+}
+
+.platform-pill.wechat {
+  border-color: #b7d8b7;
+  color: #1f7a3a;
+}
+
 .platform-pill.youtube,
 .platform-pill.tiktok,
 .platform-pill.bilibili {
@@ -292,9 +317,10 @@ button:hover {
 
 .creator-fields {
   display: grid;
-  grid-template-columns: 110px 150px minmax(220px, 1.3fr) 120px 90px 110px 96px 72px minmax(160px, 1fr) 92px 72px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
   align-items: end;
+  min-width: 0;
   border-top: 1px solid #ecece7;
   padding: 10px;
 }
@@ -320,6 +346,13 @@ button:hover {
   align-items: end;
 }
 
+.creative-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 150px 180px 120px;
+  gap: 10px;
+  align-items: end;
+}
+
 .panel-actions {
   gap: 8px;
   margin-top: 12px;
@@ -330,6 +363,16 @@ button:hover {
   display: grid;
   gap: 8px;
   margin: 0 0 12px;
+}
+
+.platform-output-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
+}
+
+.platform-output-grid label:first-child {
+  grid-column: 1 / -1;
 }
 
 .account-list > div {
@@ -406,8 +449,44 @@ button:hover {
   margin-top: 8px;
 }
 
+.creative-result {
+  min-width: 0;
+  margin-top: 12px;
+  border: 1px solid #ecece7;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfbf8;
+}
+
+.creative-result.empty {
+  color: var(--muted);
+}
+
+.creative-result .result-meta {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.creative-result pre {
+  overflow: auto;
+  max-height: 420px;
+  margin: 0;
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  padding: 10px;
+  color: var(--text);
+  background: #fff;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .history-item,
 .archive-item {
+  min-width: 0;
   border: 1px solid #ecece7;
   border-radius: 8px;
   padding: 10px;
@@ -417,6 +496,7 @@ button:hover {
 .history-list {
   display: grid;
   gap: 8px;
+  min-width: 0;
 }
 
 .history-item {
@@ -513,6 +593,7 @@ button:hover {
 
 .run-items,
 .history-archive {
+  min-width: 0;
   margin-top: 8px;
 }
 
@@ -530,20 +611,42 @@ button:hover {
 .item-table {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  margin-top: 8px;
+}
+
+.item-tools {
+  display: flex;
+  gap: 8px;
   margin-top: 8px;
 }
 
 .run-item {
   display: grid;
-  grid-template-columns: 70px minmax(220px, 1fr) 96px minmax(220px, 1.2fr);
+  grid-template-columns: 70px minmax(0, 1.4fr) 96px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
+  min-width: 0;
   border: 1px solid #ecece7;
   border-radius: 6px;
   padding: 8px;
   background: #fff;
   color: var(--muted);
   font-size: 12px;
+}
+
+.run-item.selectable {
+  grid-template-columns: 24px 70px minmax(0, 1.4fr) 96px minmax(0, 1fr);
+}
+
+.run-item > * {
+  min-width: 0;
+}
+
+.candidate-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .item-status {
@@ -641,9 +744,11 @@ pre {
 
   .two-col,
   .run-grid,
+  .creative-grid,
   .creator-toolbar,
   .creator-summary,
   .creator-fields,
+  .platform-output-grid,
   .account-list > div,
   .history-metrics,
   .run-item {

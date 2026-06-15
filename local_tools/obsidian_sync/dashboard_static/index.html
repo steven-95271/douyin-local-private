@@ -20,6 +20,7 @@
           <a href="#creators" class="active">来源</a>
           <a href="#settings">设置</a>
           <a href="#run">运行</a>
+          <a href="#creative">二创</a>
           <a href="#history">记录</a>
           <a href="#logs">日志</a>
         </nav>
@@ -43,7 +44,7 @@
           <div class="panel-head">
             <div>
               <h3>内容源库</h3>
-              <p>抖音来源可直接抓取；微博、YouTube、B站先作为来源档案预留，抓取适配器后续接入。</p>
+              <p>抖音、微博、小宇宙、公众号来源可直接抓取；YouTube、B站、TikTok 先作为来源档案预留，抓取适配器后续接入。</p>
             </div>
             <button id="addCreator" type="button">添加内容源</button>
           </div>
@@ -53,6 +54,8 @@
                 <option value="all">全部平台</option>
                 <option value="douyin">抖音</option>
                 <option value="weibo">微博</option>
+                <option value="xiaoyuzhou">小宇宙</option>
+                <option value="wechat">公众号</option>
                 <option value="youtube">YouTube</option>
                 <option value="bilibili">B站</option>
                 <option value="tiktok">TikTok</option>
@@ -75,9 +78,29 @@
             <label>Obsidian Vault
               <input id="vaultPath" type="text">
             </label>
-            <label>子目录
-              <input id="outputSubdir" type="text">
-            </label>
+            <div class="platform-output-grid">
+              <label>抖音子目录
+                <input id="outputSubdirDouyin" type="text" placeholder="Douyin/口播博主">
+              </label>
+              <label>微博子目录
+                <input id="outputSubdirWeibo" type="text" placeholder="Weibo/内容源">
+              </label>
+              <label>小宇宙子目录
+                <input id="outputSubdirXiaoyuzhou" type="text" placeholder="Podcast/小宇宙">
+              </label>
+              <label>公众号子目录
+                <input id="outputSubdirWechat" type="text" placeholder="WeChat/公众号">
+              </label>
+              <label>YouTube 子目录
+                <input id="outputSubdirYoutube" type="text" placeholder="YouTube/视频博主">
+              </label>
+              <label>B站子目录
+                <input id="outputSubdirBilibili" type="text" placeholder="Bilibili/视频博主">
+              </label>
+              <label>TikTok 子目录
+                <input id="outputSubdirTiktok" type="text" placeholder="TikTok/视频博主">
+              </label>
+            </div>
             <button id="saveSettings" type="button">保存输出设置</button>
           </div>
           <div>
@@ -89,7 +112,7 @@
               </div>
               <div>
                 <strong>微博</strong>
-                <span id="weiboAccountText">待接入 Cookie 导入与抓取适配器</span>
+                <span id="weiboAccountText">可通过 Chrome 插件导入 Cookie，用于 URL 补全和文本抓取</span>
               </div>
             </div>
             <p>抖音 Cookie 默认通过 Chrome 插件导入。插件目录：/Users/steven/Documents/Codex/2026-06-04/evil0ctal-douyin-tiktok-download-api-https/outputs/douyin-local-private/chrome_extension</p>
@@ -97,6 +120,12 @@
               <summary>抖音 Cookie 手动备用</summary>
               <label>抖音 Cookie
                 <textarea id="cookieInput" rows="4" placeholder="粘贴抖音网页版 Cookie"></textarea>
+              </label>
+            </details>
+            <details class="manual-cookie">
+              <summary>微博 Cookie 手动备用</summary>
+              <label>微博 Cookie
+                <textarea id="weiboCookieInput" rows="4" placeholder="粘贴微博网页版 Cookie"></textarea>
               </label>
             </details>
             <label>DeepSeek API Key
@@ -119,17 +148,19 @@
               <input id="forceRun" type="checkbox">
               <span>重新处理</span>
             </label>
+            <label class="check">
+              <input id="aiSummaryRun" type="checkbox" checked>
+              <span>生成 AI 总结</span>
+            </label>
           </div>
           <div class="panel-actions">
             <button id="startRun" type="button">同步选中来源</button>
-            <button id="runAllCreators" type="button">同步所有可抓取来源</button>
+            <button id="scanCandidates" type="button">只嗅探候选内容</button>
             <button id="crawlCreatorAll" type="button">全量抓取该来源</button>
             <button id="stopRun" type="button" class="secondary">停止任务</button>
-            <button id="notifyPermission" type="button" class="secondary">允许完成提醒</button>
             <button id="openOutput" type="button" class="secondary">打开输出目录</button>
-            <button id="openLog" type="button" class="secondary">打开日志</button>
           </div>
-          <p class="run-note">当前可抓取平台：抖音。微博、YouTube、B站、TikTok 来源会保存在内容源库中，暂不进入同步队列。</p>
+          <p class="run-note">下拉框会显示所有已启用来源；灰色项代表已入库但抓取适配器待接入。当前可正式抓取平台：抖音、微博、小宇宙、公众号。小宇宙公开页通常只暴露首屏单集，公众号主页暂不支持直接回溯历史，完整历史需要在内容源里补 RSS URL。</p>
           <div id="progressBox" class="progress-box">
             <div class="progress-head">
               <strong id="progressLabel">暂无进度</strong>
@@ -140,6 +171,46 @@
             </div>
             <div id="progressMeta" class="progress-meta"></div>
           </div>
+        </section>
+
+        <section id="creative" class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>二创工作台</h3>
+              <p>从本地 Markdown 素材生成可编辑草稿，默认保存到 Obsidian 的创作工坊。</p>
+            </div>
+            <button id="openCreative" type="button" class="secondary">打开创作工坊</button>
+          </div>
+          <div class="creative-grid">
+            <label>创作主题
+              <input id="creativeTopic" type="text" placeholder="例如：普通人如何建立长期主义">
+            </label>
+            <label>素材平台
+              <select id="creativePlatform">
+                <option value="all">全部平台</option>
+                <option value="douyin">抖音</option>
+                <option value="weibo">微博</option>
+                <option value="xiaoyuzhou">小宇宙</option>
+                <option value="wechat">公众号</option>
+              </select>
+            </label>
+            <label>输出类型
+              <select id="creativeFormat">
+                <option value="all">全套草稿</option>
+                <option value="xiaohongshu">小红书图文</option>
+                <option value="douyin_dialogue">抖音对谈脚本</option>
+                <option value="twitter">Twitter/X</option>
+                <option value="wechat_article">公众号文章</option>
+              </select>
+            </label>
+            <label>素材数量
+              <input id="creativeLimit" type="number" min="1" max="20" value="8">
+            </label>
+          </div>
+          <div class="panel-actions">
+            <button id="generateCreative" type="button">生成二创草稿</button>
+          </div>
+          <div id="creativeResult" class="creative-result empty">暂无草稿</div>
         </section>
 
         <section id="history" class="panel">

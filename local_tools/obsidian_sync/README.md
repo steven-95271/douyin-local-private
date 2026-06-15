@@ -1,19 +1,20 @@
 # Douyin -> Obsidian Sync
 
-内部自用工具：把已配置抖音口播博主的视频自动转成 Obsidian Markdown 笔记。
+内部自用工具：把已配置抖音口播博主的视频、微博博主的文字内容、小宇宙播客单集、公众号文章自动转成 Obsidian Markdown 笔记。
 
-当前可抓取平台是 Douyin；微博、YouTube、B站、TikTok 已在 Dashboard 里预留为内容源档案，抓取适配器后续接入。
+当前可抓取平台是抖音、微博、小宇宙和公众号；YouTube、B站、TikTok 已在 Dashboard 里预留为内容源档案，抓取适配器后续接入。
 
 ## 能做什么
 
 - 维护一个「内容源库」。
-- 自动抓取启用抖音来源的新视频。
-- 跳过已经成功处理过的视频。
-- 临时下载视频，抽音频，本地 Whisper 转录。
+- 自动抓取启用抖音来源的新视频、微博来源的新内容、小宇宙公开播客单集、公众号公开文章。
+- 跳过已经成功处理过的内容。
+- 抖音会临时下载视频、抽音频、本地 Whisper 转录；微博直接读取正文；小宇宙会临时下载公开音频并本地转录。
 - 调用 DeepSeek 生成结构化笔记。
 - 写入 Obsidian Vault。
 - 删除临时视频和音频，只保留 Markdown。
 - 每周定时同步内容，并生成周报发送到 Hermes/Telegram。
+- 从本地知识库生成小红书、抖音对谈、Twitter/X 和公众号二创草稿。
 
 ## 常用入口
 
@@ -33,20 +34,33 @@ http://127.0.0.1:8787
 Dashboard 用来做这些事：
 
 - 添加、补全、启用、停用内容源。
-- 导入 Cookie 和保存 DeepSeek API Key。
+- 导入抖音/微博 Cookie 和保存 DeepSeek API Key。
 - 启动单个可抓取来源。
-- 串行跑所有可抓取且启用的来源。
+- 「只嗅探候选内容」用于先预览候选列表，不下载、不转录、不写入；嗅探完成后可在运行记录里勾选几条，再点「抓取选中内容」。
+- 「同步选中来源」用于日常增量；「全量抓取该来源」会深度回溯历史内容。微博全量默认最多扫描约 350 页，可用 `fetch.weibo_full_max_pages` 调整。小宇宙和公众号如果识别到 RSS，会用 RSS 回溯更多历史；没有 RSS 时，小宇宙只能处理公开页面里暴露的单集，公众号只能处理单篇公开文章。
+- 「生成 AI 总结」默认开启。取消勾选后，本轮只保存原文或逐字稿，不调用 DeepSeek。
 - 查看最近一次任务进度、失败/等待/进行中的视频状态。
 - 对最近一次任务的失败视频一键重爬；成功和跳过的视频默认折叠隐藏，不进入重爬队列。
-- 打开输出目录和日志。
+- 打开输出目录。
+- 在「二创」里按主题从本地 Markdown 素材生成草稿，并保存到 Obsidian 的 `创作工坊`。
+
+macOS App 壳目前不作为推荐入口。稳定入口是上面的本地网页 Dashboard。
 
 ## 输出位置
 
-视频笔记：
+Dashboard 的「输出设置」可以按平台配置子目录。默认是：
 
-```text
-/Users/steven/Documents/Obsidian/MyVault/Douyin/口播博主
-```
+| 平台 | 默认子目录 |
+| --- | --- |
+| 抖音 | `Douyin/口播博主` |
+| 微博 | `Weibo/内容源` |
+| 小宇宙 | `Podcast/小宇宙` |
+| 公众号 | `WeChat/公众号` |
+| YouTube | `YouTube/视频博主` |
+| B站 | `Bilibili/视频博主` |
+| TikTok | `TikTok/视频博主` |
+
+目前抖音视频抓取、微博文本抓取、小宇宙公开播客抓取和公众号公开文章抓取已接入；YouTube、B站、TikTok 下一阶段接入。
 
 周报：
 
@@ -78,7 +92,7 @@ Dashboard 用来做这些事：
 - 关键词
 - 逐字稿
 
-微博笔记偏轻量，后续微博抓取接入后默认包含：
+微博笔记偏轻量，默认包含：
 
 - 原文
 - 要点
@@ -90,7 +104,25 @@ Dashboard 用来做这些事：
 微博不会默认生成逐字稿、逻辑树、结构导图、分段解析和行动项，避免把短内容过度蒸馏。
 微博轻量总结的约束在 `local_tools/obsidian_sync/prompts/weibo_summarize.md`。
 
+小宇宙播客笔记偏长内容整理，默认包含 Shownotes、速览、内容地图、分段笔记、核心观点、关键概念、可复用表达、行动项、关键词和逐字稿。
+长内容会先分块整理，再生成最终笔记。默认可在 `podcast_summary` 里单独使用更强模型，例如 `deepseek-v4-pro`。
+小宇宙公开节目页通常只暴露首屏单集；如果要回溯完整历史，建议在内容源里补充 `RSS URL`。
+
+公众号笔记偏文章整理，默认保留导语、AI 摘要、原文、我的标注和相关链接。单篇 `mp.weixin.qq.com` 文章 URL 可直接抓取；如果要持续同步某个公众号的历史和更新，需要在内容源里补充可访问的 `RSS URL`。
+
+公众号单篇公开文章使用内置解析器直接抽取正文，不依赖外部 Docker 服务。历史列表同步仍建议通过 RSS URL 接入。
+
 已经成功生成过的旧笔记默认不会重复处理。需要升级旧笔记格式时，在 Dashboard 勾选「重新处理」后再跑。
+
+## 二创工作台
+
+入口在 Dashboard 的「二创」。
+
+- 可按主题、平台和输出类型筛选素材。
+- 输出类型支持全套草稿、小红书图文、抖音对谈脚本、Twitter/X 和公众号文章。
+- 素材来自本地 Obsidian 已生成的 Markdown，不重新抓取平台内容。
+- 草稿默认写入 `/Users/steven/Documents/Obsidian/MyVault/创作工坊/`。
+- 默认使用 `creative.model`，当前配置为 `deepseek-v4-pro`；可在 `creators.yaml` 里调整。
 
 ## Cookie
 
@@ -98,6 +130,12 @@ Dashboard 用来做这些事：
 
 ```text
 local_tools/douyin_cookie.txt
+```
+
+微博 Cookie 文件：
+
+```text
+local_tools/weibo_cookie.txt
 ```
 
 Chrome 插件目录：
@@ -111,7 +149,7 @@ Chrome 插件目录：
 1. 浏览器登录 `https://www.douyin.com`。
 2. 打开 `chrome://extensions/`。
 3. 加载或重新加载上面的插件目录。
-4. 点击插件图标，导入抖音 Cookie。
+4. 点击插件图标，导入抖音或微博 Cookie。
 
 多账号可以配置多个 Cookie Profile：
 
@@ -131,7 +169,7 @@ creators:
 
 ## 内容源库
 
-新增抖音来源时，只需要填主页 URL，然后点「URL 补全」。
+新增抖音、微博、小宇宙或公众号来源时，只需要填主页 URL，然后点「URL 补全」。微博需要先导入微博 Cookie，小宇宙和公众号公开链接不需要 Cookie。
 
 系统会自动尝试读取：
 
@@ -202,7 +240,7 @@ local_tools/obsidian_sync/state.sqlite
 
 ## 注意
 
-- `creators.yaml` 是本地配置，不要提交到 GitHub。
+- `creators.yaml` 是内容源和任务配置文件；不要把 API Key、Cookie 或密码写进去。
 - `.env`、Cookie、API Key 都只保存在本地。
 - Dashboard 默认处理所有可扫描的新视频，已成功处理过的视频会自动跳过。
 - 默认每个抖音来源最多 2 条视频并发处理，来源之间仍然串行。
