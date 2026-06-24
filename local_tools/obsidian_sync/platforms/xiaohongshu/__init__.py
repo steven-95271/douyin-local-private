@@ -1,0 +1,1 @@
+"""Xiaohongshu platform adapter."""

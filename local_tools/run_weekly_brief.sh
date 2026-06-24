@@ -8,8 +8,9 @@ if [ ! -x .venv/bin/python ]; then
   bash local_tools/setup_local.sh
 fi
 
-mkdir -p local_tools/obsidian_sync/work/logs
-log_file="local_tools/obsidian_sync/work/logs/weekly_brief.log"
+log_dir="$HOME/Library/Logs/douyin-local-private"
+mkdir -p "$log_dir" local_tools/obsidian_sync/work/logs
+log_file="$log_dir/weekly_brief.log"
 config_file="local_tools/obsidian_sync/creators.yaml"
 
 {

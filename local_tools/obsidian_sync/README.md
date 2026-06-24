@@ -1,8 +1,8 @@
 # Douyin -> Obsidian Sync
 
-内部自用工具：把已配置抖音口播博主的视频、微博博主的文字内容、小宇宙播客单集、公众号文章自动转成 Obsidian Markdown 笔记。
+内部自用工具：把已配置抖音口播博主的视频、微博博主的文字内容、小宇宙播客单集、公众号文章和小红书内容自动转成 Obsidian Markdown 笔记。
 
-当前可抓取平台是抖音、微博、小宇宙和公众号；YouTube、B站、TikTok 已在 Dashboard 里预留为内容源档案，抓取适配器后续接入。
+当前可抓取平台是抖音、微博、小宇宙、公众号和小红书；YouTube、B站、TikTok、快手、贴吧、知乎已在 Dashboard 里预留为内容源档案，抓取适配器后续接入。
 
 ## 能做什么
 
@@ -14,7 +14,6 @@
 - 写入 Obsidian Vault。
 - 删除临时视频和音频，只保留 Markdown。
 - 每周定时同步内容，并生成周报发送到 Hermes/Telegram。
-- 从本地知识库生成小红书、抖音对谈、Twitter/X 和公众号二创草稿。
 
 ## 常用入口
 
@@ -33,18 +32,17 @@ http://127.0.0.1:8787
 
 Dashboard 用来做这些事：
 
-- 添加、补全、启用、停用内容源。
-- 导入抖音/微博 Cookie 和保存 DeepSeek API Key。
+- 添加、补全、启用、停用内容源。URL 补全使用本地脚本和平台页面/RSS 数据，不调用大模型。
+- 抖音和小红书建议使用扫码登录；微博/公众号后台仍通过 Cookie 或 token 接入。
+- 公众号可直接填名称补全；需要先登录 `mp.weixin.qq.com` 公众号后台，并用 Chrome 插件导入公众号后台 Cookie。
 - 启动单个可抓取来源。
-- 「只嗅探候选内容」用于先预览候选列表，不下载、不转录、不写入；嗅探完成后可在运行记录里勾选几条，再点「抓取选中内容」。
-- 「同步选中来源」用于日常增量；「全量抓取该来源」会深度回溯历史内容。微博全量默认最多扫描约 350 页，可用 `fetch.weibo_full_max_pages` 调整。小宇宙和公众号如果识别到 RSS，会用 RSS 回溯更多历史；没有 RSS 时，小宇宙只能处理公开页面里暴露的单集，公众号只能处理单篇公开文章。
+- 「全量嗅探候选内容」用于先预览全部候选列表，不下载、不转录、不写入；嗅探完成后可在运行记录里勾选几条，再点「抓取选中内容」。
+- 「全量抓取该来源」会直接深度回溯并处理历史内容。微博全量默认最多扫描约 350 页，可用 `fetch.weibo_full_max_pages` 调整。小宇宙如果识别到 RSS，会用 RSS 回溯更多历史；公众号可通过后台 `fakeid` 或 RSS 回溯历史。
 - 「生成 AI 总结」默认开启。取消勾选后，本轮只保存原文或逐字稿，不调用 DeepSeek。
+- 「素材保留」可控制是否额外保留视频、音频、逐字稿 TXT、平台原始 JSON，以及 Markdown 内是否保留原文/逐字稿。
 - 查看最近一次任务进度、失败/等待/进行中的视频状态。
 - 对最近一次任务的失败视频一键重爬；成功和跳过的视频默认折叠隐藏，不进入重爬队列。
 - 打开输出目录。
-- 在「二创」里按主题从本地 Markdown 素材生成草稿，并保存到 Obsidian 的 `创作工坊`。
-
-macOS App 壳目前不作为推荐入口。稳定入口是上面的本地网页 Dashboard。
 
 ## 输出位置
 
@@ -56,11 +54,15 @@ Dashboard 的「输出设置」可以按平台配置子目录。默认是：
 | 微博 | `Weibo/内容源` |
 | 小宇宙 | `Podcast/小宇宙` |
 | 公众号 | `WeChat/公众号` |
+| 小红书 | `Xiaohongshu/内容源` |
 | YouTube | `YouTube/视频博主` |
 | B站 | `Bilibili/视频博主` |
 | TikTok | `TikTok/视频博主` |
+| 快手 | `Kuaishou/视频博主` |
+| 贴吧 | `Tieba/贴吧` |
+| 知乎 | `Zhihu/内容源` |
 
-目前抖音视频抓取、微博文本抓取、小宇宙公开播客抓取和公众号公开文章抓取已接入；YouTube、B站、TikTok 下一阶段接入。
+目前抖音视频抓取、微博文本抓取、小宇宙公开播客抓取、公众号公开文章抓取和小红书内容抓取已接入；YouTube、B站、TikTok、快手、贴吧、知乎下一阶段接入。
 
 周报：
 
@@ -75,6 +77,8 @@ Dashboard 的「输出设置」可以按平台配置子目录。默认是：
 ```
 
 视频 ID 不放在文件名里，会保存在 frontmatter、状态库和运行记录中。若同一天同博主出现同名短标题，系统会自动追加 `-2`、`-3` 防止覆盖。
+
+素材保留默认较克制：只保留 Markdown，临时视频和音频会删除。需要溯源时，可在 Dashboard 的「输出设置」里勾选额外保留视频、音频、逐字稿 TXT 或平台原始 JSON。额外文件会保存在 Markdown 同目录旁边。
 
 ## 笔记结构
 
@@ -108,34 +112,47 @@ Dashboard 的「输出设置」可以按平台配置子目录。默认是：
 长内容会先分块整理，再生成最终笔记。默认可在 `podcast_summary` 里单独使用更强模型，例如 `deepseek-v4-pro`。
 小宇宙公开节目页通常只暴露首屏单集；如果要回溯完整历史，建议在内容源里补充 `RSS URL`。
 
-公众号笔记偏文章整理，默认保留导语、AI 摘要、原文、我的标注和相关链接。单篇 `mp.weixin.qq.com` 文章 URL 可直接抓取；如果要持续同步某个公众号的历史和更新，需要在内容源里补充可访问的 `RSS URL`。
+公众号笔记偏文章整理，默认保留导语、AI 摘要、原文、我的标注和相关链接。单篇 `mp.weixin.qq.com` 文章 URL 可直接抓取；填公众号名称并补全后，会通过公众号后台 `searchbiz`/`appmsgpublish` 接口同步历史文章；RSS URL 仍然可用。
 
 公众号单篇公开文章使用内置解析器直接抽取正文，不依赖外部 Docker 服务。历史列表同步仍建议通过 RSS URL 接入。
 
 已经成功生成过的旧笔记默认不会重复处理。需要升级旧笔记格式时，在 Dashboard 勾选「重新处理」后再跑。
 
-## 二创工作台
+## 登录态
 
-入口在 Dashboard 的「二创」。
+抖音和小红书建议在 Dashboard「账号与模型」里使用「扫码登录」。系统会打开真实 Chrome 窗口，使用本地 browser profile 保存登录态，并在登录成功后把当前会话同步给抓取流程。
 
-- 可按主题、平台和输出类型筛选素材。
-- 输出类型支持全套草稿、小红书图文、抖音对谈脚本、Twitter/X 和公众号文章。
-- 素材来自本地 Obsidian 已生成的 Markdown，不重新抓取平台内容。
-- 草稿默认写入 `/Users/steven/Documents/Obsidian/MyVault/创作工坊/`。
-- 默认使用 `creative.model`，当前配置为 `deepseek-v4-pro`；可在 `creators.yaml` 里调整。
+首次使用如果提示 Playwright 缺失，运行：
+
+```bash
+.venv/bin/python -m pip install -r requirements-obsidian.txt
+```
 
 ## Cookie
 
-默认 Cookie 文件：
+抖音扫码登录成功后会同步到：
 
 ```text
 local_tools/douyin_cookie.txt
+```
+
+小红书扫码登录成功后会同步到：
+
+```text
+local_tools/xiaohongshu_cookie.txt
 ```
 
 微博 Cookie 文件：
 
 ```text
 local_tools/weibo_cookie.txt
+```
+
+公众号后台 Cookie/token 文件：
+
+```text
+local_tools/wechat_mp_cookie.txt
+local_tools/wechat_mp_token.txt
 ```
 
 Chrome 插件目录：
@@ -146,10 +163,10 @@ Chrome 插件目录：
 
 导入步骤：
 
-1. 浏览器登录 `https://www.douyin.com`。
+1. 浏览器登录 `https://www.douyin.com`、`https://weibo.com`，或 `https://mp.weixin.qq.com` 公众号后台。
 2. 打开 `chrome://extensions/`。
 3. 加载或重新加载上面的插件目录。
-4. 点击插件图标，导入抖音或微博 Cookie。
+4. 点击插件图标，导入抖音、微博或公众号后台 Cookie。
 
 多账号可以配置多个 Cookie Profile：
 
@@ -169,7 +186,7 @@ creators:
 
 ## 内容源库
 
-新增抖音、微博、小宇宙或公众号来源时，只需要填主页 URL，然后点「URL 补全」。微博需要先导入微博 Cookie，小宇宙和公众号公开链接不需要 Cookie。
+新增抖音、微博、小宇宙或公众号来源时，通常填主页 URL 后点「URL 补全」。公众号也可以直接填公众号名称；名称搜索需要先导入公众号后台 Cookie/token。微博需要先导入微博 Cookie，小宇宙和公众号公开文章/RSS 链接不需要 Cookie。
 
 系统会自动尝试读取：
 
@@ -186,9 +203,10 @@ creators:
 
 ## 自动任务
 
-已配置两个 macOS `launchd` 任务：
+已配置三个 macOS `launchd` 任务：
 
-- 周日 22:00：同步所有可抓取且启用的来源。
+- 周一 06:00：同步所有可抓取且启用的来源。
+- 周三 06:00：同步所有可抓取且启用的来源。
 - 周一 11:00：生成周报，并通过 Hermes 发送 Telegram 精简版。
 
 自动任务不依赖 Dashboard 页面，也不依赖 `8787` 端口。电脑需要处于开机且网络可用状态。
@@ -220,16 +238,16 @@ Dashboard 日志：
 local_tools/obsidian_sync/work/logs/dashboard_sync.log
 ```
 
-周日同步日志：
+自动同步日志：
 
 ```text
-local_tools/obsidian_sync/work/logs/weekly_content_sync.log
+~/Library/Logs/douyin-local-private/weekly_content_sync.log
 ```
 
 周报日志：
 
 ```text
-local_tools/obsidian_sync/work/logs/weekly_brief.log
+~/Library/Logs/douyin-local-private/weekly_brief.log
 ```
 
 本地状态库：

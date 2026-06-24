@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -44,10 +45,26 @@ from local_tools.batch_download import (  # noqa: E402
     read_secret_file,
     stream_to_file,
 )
+from local_tools.obsidian_sync.platforms.base import PlatformRunContext  # noqa: E402
+from local_tools.obsidian_sync.platforms.registry import PlatformRegistry  # noqa: E402
+from local_tools.obsidian_sync.platforms.xiaohongshu.crawler import XiaohongshuCrawler  # noqa: E402
 
 
 VIDEO_TYPES = {0, 4, 51, 55, 58, 61}
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat"}
+KNOWN_PLATFORMS = {
+    "douyin",
+    "weibo",
+    "xiaoyuzhou",
+    "wechat",
+    "xiaohongshu",
+    "youtube",
+    "bilibili",
+    "tiktok",
+    "kuaishou",
+    "tieba",
+    "zhihu",
+}
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat", "xiaohongshu"}
 WHISPER_MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
 WHISPER_MODEL_LOCK = threading.Lock()
 
@@ -100,10 +117,18 @@ def infer_platform_from_url(url: str) -> str:
     text = str(url or "").lower()
     if "mp.weixin.qq.com" in text or "weixin.qq.com" in text:
         return "wechat"
+    if "xiaohongshu.com" in text or "xhslink.com" in text:
+        return "xiaohongshu"
     if "xiaoyuzhoufm.com" in text or "feed.xyzfm.space" in text or "podcast.xyz" in text:
         return "xiaoyuzhou"
     if "weibo.com" in text or "weibo.cn" in text:
         return "weibo"
+    if "kuaishou.com" in text or "gifshow.com" in text:
+        return "kuaishou"
+    if "tieba.baidu.com" in text:
+        return "tieba"
+    if "zhihu.com" in text:
+        return "zhihu"
     if "youtube.com" in text or "youtu.be" in text:
         return "youtube"
     if "bilibili.com" in text or "b23.tv" in text:
@@ -128,9 +153,13 @@ def default_output_subdirs(config: Optional[Dict[str, Any]] = None) -> Dict[str,
         "weibo": "Weibo/内容源",
         "xiaoyuzhou": "Podcast/小宇宙",
         "wechat": "WeChat/公众号",
+        "xiaohongshu": "Xiaohongshu/内容源",
         "youtube": "YouTube/视频博主",
         "bilibili": "Bilibili/视频博主",
         "tiktok": "TikTok/视频博主",
+        "kuaishou": "Kuaishou/视频博主",
+        "tieba": "Tieba/贴吧",
+        "zhihu": "Zhihu/内容源",
     }
 
 
@@ -200,8 +229,53 @@ def weibo_cookie_profile_path(config: Dict[str, Any], creator: Optional[Dict[str
     return project_path(str(config.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))
 
 
+def wechat_mp_cookie_path(config: Dict[str, Any]) -> Path:
+    return project_path(str(config.get("wechat_mp_cookie_file", "local_tools/wechat_mp_cookie.txt")))
+
+
+def wechat_mp_token_path(config: Dict[str, Any]) -> Path:
+    return project_path(str(config.get("wechat_mp_token_file", "local_tools/wechat_mp_token.txt")))
+
+
+def xiaohongshu_cookie_path(config: Dict[str, Any]) -> Path:
+    return project_path(str(config.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
+
+
 def apply_cookie_for_creator(config: Dict[str, Any], creator: Optional[Dict[str, Any]] = None) -> None:
-    apply_runtime_cookies(read_secret_file(cookie_profile_path(config, creator)), None)
+    if creator is None or creator_platform(creator) != "douyin":
+        return
+    cookie_path = cookie_profile_path(config, creator)
+    try:
+        cookie = read_secret_file(cookie_path)
+    except FileNotFoundError as exc:
+        raise RuntimeError("抖音 Cookie 缺失。请先在当前 Chrome 登录抖音，并用 Chrome 插件导入抖音 Cookie。") from exc
+    apply_runtime_cookies(cookie, None)
+
+
+def read_optional_secret(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+
+
+def creator_prerequisite_error(config: Dict[str, Any], creator: Dict[str, Any]) -> str:
+    platform = creator_platform(creator)
+    if platform == "douyin":
+        text = read_optional_secret(cookie_profile_path(config, creator))
+        if not any(marker in text for marker in ("sessionid=", "sessionid_ss=", "sid_guard=", "passport_csrf_token=")):
+            return "抖音 Cookie 缺失。请先登录抖音并用 Chrome 插件导入 Cookie。"
+    if platform == "weibo":
+        if not read_optional_secret(weibo_cookie_profile_path(config, creator)):
+            return "微博 Cookie 缺失。请先登录微博并用 Chrome 插件导入 Cookie。"
+    if platform == "xiaohongshu":
+        text = read_optional_secret(xiaohongshu_cookie_path(config))
+        if "web_session=" not in text:
+            return "小红书 Cookie 缺失。请先登录小红书并用 Chrome 插件导入 Cookie。"
+    if platform == "wechat" and wechat_fakeid_from_creator(creator):
+        if not read_optional_secret(wechat_mp_cookie_path(config)) or not read_optional_secret(wechat_mp_token_path(config)):
+            return "公众号后台 Cookie/token 缺失。请先登录 mp.weixin.qq.com 后台并用 Chrome 插件导入公众号后台 Cookie。"
+    return ""
 
 
 def ensure_state(conn: sqlite3.Connection) -> None:
@@ -930,6 +1004,15 @@ def wechat_headers(referer: str = "https://mp.weixin.qq.com/") -> Dict[str, str]
     }
 
 
+def wechat_mp_headers(cookie: str) -> Dict[str, str]:
+    headers = wechat_headers("https://mp.weixin.qq.com/")
+    headers["Accept"] = "application/json, text/plain, */*"
+    headers["X-Requested-With"] = "XMLHttpRequest"
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
 def clean_wechat_text(value: str) -> str:
     value = html.unescape(value or "")
     value = re.sub(r"\s+", " ", value).strip()
@@ -940,6 +1023,62 @@ def extract_wechat_biz_from_url(url: str) -> str:
     parsed = urlparse(str(url or ""))
     query = parse_qs(parsed.query)
     return str(query.get("__biz", [""])[0]).strip()
+
+
+def extract_meta(html_text: str, name: str) -> str:
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{re.escape(name)}["\']',
+        rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_text or "", re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+    return ""
+
+
+def wechat_fakeid_from_creator(creator: Dict[str, Any]) -> str:
+    for field in ("wechat_fakeid", "platform_id", "wechat_biz"):
+        value = str(creator.get(field) or "").strip()
+        if value and value.lower() not in {"none", "null"}:
+            return value
+    url = str(creator.get("url") or "")
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("fakeid", "__biz"):
+        value = str(query.get(key, [""])[0]).strip()
+        if value:
+            return value
+    return ""
+
+
+async def fetch_wechat_mp_json(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    *,
+    cookie: str,
+    token: str,
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    query = dict(params)
+    query["token"] = token
+    query["lang"] = "zh_CN"
+    query["f"] = "json"
+    query["ajax"] = 1
+    response = await client.get(endpoint, params=query, headers=wechat_mp_headers(cookie), follow_redirects=True)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("公众号后台接口返回了非 JSON 对象")
+    resp = data.get("base_resp") if isinstance(data.get("base_resp"), dict) else {}
+    ret = resp.get("ret")
+    if ret not in (0, "0", None):
+        message = str(resp.get("err_msg") or resp.get("errmsg") or data.get("errmsg") or "")
+        if str(ret) in {"200003", "-1"}:
+            raise RuntimeError("公众号后台 Cookie/token 已失效。请打开 mp.weixin.qq.com 后台，并用 Chrome 插件重新导入公众号后台 Cookie。")
+        raise RuntimeError(f"公众号后台接口错误：{ret} {message}".strip())
+    return data
 
 
 def extract_wechat_js_var(html_text: str, name: str) -> str:
@@ -1136,6 +1275,67 @@ def rss_item_to_wechat_video(creator: Dict[str, Any], item: ET.Element) -> Optio
     )
 
 
+def wechat_mp_article_to_video(creator: Dict[str, Any], article: Dict[str, Any], fakeid: str) -> Optional[CreatorVideo]:
+    title = clean_wechat_text(str(article.get("title") or ""))
+    link = html.unescape(str(article.get("link") or "")).strip()
+    stable = str(article.get("aid") or article.get("appmsgid") or article.get("msgid") or link or title).strip()
+    if not stable:
+        return None
+    article_id = hashlib.sha1(f"{fakeid}:{stable}".encode("utf-8")).hexdigest()[:16]
+    digest = strip_html_text(str(article.get("digest") or article.get("desc") or ""))
+    tags = creator.get("tags") or ["wechat", "公众号"]
+    if not isinstance(tags, list):
+        tags = ["wechat", "公众号"]
+    raw = dict(article)
+    raw.update(
+        {
+            "original_text": "",
+            "description_text": digest,
+            "wechat_fakeid": fakeid,
+            "wechat_biz": fakeid,
+        }
+    )
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=str(creator.get("name") or creator["key"]),
+        video_id=f"wechat_{article_id}",
+        source_url=link,
+        title=compact_title(title, article_id),
+        create_time=parse_datetime_to_timestamp(article.get("create_time") or article.get("update_time")),
+        raw=raw,
+        tags=[str(tag) for tag in tags],
+        platform="wechat",
+    )
+
+
+def extract_wechat_mp_articles(data: Dict[str, Any], creator: Dict[str, Any], fakeid: str) -> Tuple[List[CreatorVideo], int, int]:
+    try:
+        publish_page = json.loads(str(data.get("publish_page") or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("公众号后台文章列表返回格式异常：publish_page 不是 JSON") from exc
+    publish_list = publish_page.get("publish_list") if isinstance(publish_page.get("publish_list"), list) else []
+    total_count = int(publish_page.get("total_count") or 0)
+    videos: List[CreatorVideo] = []
+    message_count = 0
+    for item in publish_list:
+        if not isinstance(item, dict) or not item.get("publish_info"):
+            continue
+        try:
+            publish_info = json.loads(str(item.get("publish_info") or "{}"))
+        except json.JSONDecodeError:
+            continue
+        appmsgex = publish_info.get("appmsgex") if isinstance(publish_info.get("appmsgex"), list) else []
+        if appmsgex:
+            message_count += 1
+        for article in appmsgex:
+            if not isinstance(article, dict):
+                continue
+            video = wechat_mp_article_to_video(creator, article, fakeid)
+            if video:
+                videos.append(video)
+    return videos, message_count, total_count
+
+
 async def fetch_wechat_rss(creator: Dict[str, Any], rss_url: str, config: Dict[str, Any], scan_limit: int = 0) -> List[CreatorVideo]:
     fetch_cfg = config.get("fetch", {})
     timeout = httpx.Timeout(float(fetch_cfg.get("wechat_timeout_seconds", 30)), connect=10.0)
@@ -1164,6 +1364,74 @@ async def fetch_wechat_rss(creator: Dict[str, Any], rss_url: str, config: Dict[s
     return videos
 
 
+async def fetch_wechat_mp_articles(
+    creator: Dict[str, Any],
+    config: Dict[str, Any],
+    scan_limit: int = 0,
+    full_history: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+    run_id: Optional[str] = None,
+) -> List[CreatorVideo]:
+    fakeid = wechat_fakeid_from_creator(creator)
+    if not fakeid:
+        raise RuntimeError("公众号来源缺少 fakeid。请在内容源里填写公众号名称并点 URL 补全。")
+    cookie = read_secret_file(wechat_mp_cookie_path(config))
+    token = read_secret_file(wechat_mp_token_path(config))
+    if not cookie or not token:
+        raise RuntimeError("公众号后台 Cookie/token 缺失。请先登录 mp.weixin.qq.com 后台，并用 Chrome 插件导入公众号后台 Cookie。")
+
+    fetch_cfg = config.get("fetch", {})
+    count_per_page = int(fetch_cfg.get("wechat_mp_count_per_page", 5))
+    max_pages = int(fetch_cfg.get("wechat_mp_full_max_pages", 1000) if full_history else fetch_cfg.get("wechat_mp_max_pages", 10))
+    delay = float(fetch_cfg.get("wechat_mp_delay_seconds", fetch_cfg.get("delay_seconds", 2)))
+    timeout = httpx.Timeout(float(fetch_cfg.get("wechat_timeout_seconds", 30)), connect=10.0)
+
+    videos: List[CreatorVideo] = []
+    seen_ids: set[str] = set()
+    begin = 0
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for page in range(1, max_pages + 1):
+            data = await fetch_wechat_mp_json(
+                client,
+                "https://mp.weixin.qq.com/cgi-bin/appmsgpublish",
+                cookie=cookie,
+                token=token,
+                params={
+                    "sub": "list",
+                    "search_field": "null",
+                    "begin": begin,
+                    "count": count_per_page,
+                    "query": "",
+                    "fakeid": fakeid,
+                    "type": "101_1",
+                    "free_publish_type": 1,
+                    "sub_action": "list_ex",
+                },
+            )
+            page_videos, message_count, total_count = extract_wechat_mp_articles(data, creator, fakeid)
+            for video in page_videos:
+                if video.video_id in seen_ids:
+                    continue
+                videos.append(video)
+                seen_ids.add(video.video_id)
+                if scan_limit and len(videos) >= scan_limit:
+                    if conn and run_id:
+                        update_run(conn, run_id, current_stage=f"嗅探公众号后台 {page}/{max_pages}", detected_count=len(videos))
+                    return videos
+            if conn and run_id:
+                stage_total = f" / {total_count}" if total_count else ""
+                update_run(conn, run_id, current_stage=f"嗅探公众号后台 {page}/{max_pages}{stage_total}", detected_count=len(videos))
+            print(f"WECHAT_MP_PAGE {page}/{max_pages} begin={begin} collected={len(videos)} total={total_count}")
+            if not page_videos or message_count <= 0:
+                break
+            begin += message_count
+            if total_count and begin >= total_count:
+                break
+            if page < max_pages and delay > 0:
+                await asyncio.sleep(delay)
+    return videos
+
+
 async def fetch_wechat_articles(
     creator: Dict[str, Any],
     config: Dict[str, Any],
@@ -1181,13 +1449,655 @@ async def fetch_wechat_articles(
             update_run(conn, run_id, current_stage="嗅探公众号 RSS 完成", detected_count=len(videos))
         return videos
 
+    if wechat_fakeid_from_creator(creator):
+        if conn and run_id:
+            update_run(conn, run_id, current_stage="嗅探公众号后台")
+        videos = await fetch_wechat_mp_articles(creator, config, scan_limit, full_history, conn, run_id)
+        if conn and run_id:
+            update_run(conn, run_id, current_stage="嗅探公众号后台完成", detected_count=len(videos))
+        return videos
+
     url = str(creator.get("url") or "").strip()
     if "mp.weixin.qq.com" not in url:
-        raise RuntimeError("公众号暂不支持直接按主页回溯历史。请填写单篇文章 URL，或在内容源里补 RSS URL。")
+        raise RuntimeError("公众号缺少可抓取信息。请填写单篇文章 URL、RSS URL，或输入公众号名称后点 URL 补全。")
     video = await fetch_wechat_article(creator, url, config)
     if conn and run_id:
         update_run(conn, run_id, current_stage="嗅探公众号文章", detected_count=1)
     return [video]
+
+
+def xiaohongshu_headers(config: Dict[str, Any], referer: str = "https://www.xiaohongshu.com/") -> Dict[str, str]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer,
+    }
+    cookie = read_secret_file(xiaohongshu_cookie_path(config))
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def xhs_downloader_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    raw = config.get("xhs_downloader")
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "api_url": str(raw.get("api_url") or "http://127.0.0.1:5556/xhs/detail").strip(),
+        "download": bool(raw.get("download", False)),
+        "timeout_seconds": float(raw.get("timeout_seconds", config.get("fetch", {}).get("xiaohongshu_timeout_seconds", 30))),
+        "proxy": str(raw.get("proxy") or "").strip(),
+    }
+
+
+def iter_nested_values(value: Any) -> Iterable[Any]:
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from iter_nested_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from iter_nested_values(item)
+    else:
+        yield value
+
+
+def first_nested_text(value: Any, keys: tuple[str, ...]) -> str:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if any(token in key_text for token in keys):
+                text = str(item or "").strip() if not isinstance(item, (dict, list)) else ""
+                if text:
+                    return strip_html_text(text)
+        for item in value.values():
+            text = first_nested_text(item, keys)
+            if text:
+                return text
+    elif isinstance(value, list):
+        for item in value:
+            text = first_nested_text(item, keys)
+            if text:
+                return text
+    return ""
+
+
+def nested_media_urls(value: Any, *, kind: str) -> list[str]:
+    if kind == "video":
+        pattern = re.compile(r"https?://[^\s\"'<>\\]+(?:mp4|m3u8)[^\s\"'<>\\]*", re.IGNORECASE)
+    else:
+        pattern = re.compile(r"https?://[^\s\"'<>\\]+(?:jpg|jpeg|png|webp|heic)[^\s\"'<>\\]*", re.IGNORECASE)
+    urls: list[str] = []
+    for item in iter_nested_values(value):
+        if not isinstance(item, str):
+            continue
+        text = html.unescape(item).replace("\\u002F", "/").replace("\\/", "/")
+        for match in pattern.findall(text):
+            if "xhscdn" in match or "xiaohongshu" in match:
+                urls.append(match)
+    return list(dict.fromkeys(urls))
+
+
+def nested_timestamp(value: Any) -> Optional[int]:
+    for item in iter_nested_values(value):
+        if isinstance(item, (int, float)):
+            number = int(item)
+            if 1_000_000_000_000 <= number <= 4_000_000_000_000:
+                return number // 1000
+            if 1_000_000_000 <= number <= 4_000_000_000:
+                return number
+        if isinstance(item, str) and item.isdigit():
+            number = int(item)
+            if 1_000_000_000_000 <= number <= 4_000_000_000_000:
+                return number // 1000
+            if 1_000_000_000 <= number <= 4_000_000_000:
+                return number
+    return None
+
+
+def build_xiaohongshu_video_from_payload(creator: Dict[str, Any], url: str, payload: Dict[str, Any]) -> CreatorVideo:
+    note_id = extract_xiaohongshu_note_id(url)
+    if not note_id:
+        for key in ("note_id", "noteId", "作品ID", "id"):
+            value = first_nested_text(payload, (key.lower(),))
+            if value and re.fullmatch(r"[A-Za-z0-9]{8,64}", value):
+                note_id = value
+                break
+    note_id = note_id or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    title = (
+        first_nested_text(payload, ("title", "displaytitle", "作品标题", "笔记标题"))
+        or first_nested_text(payload, ("desc", "description", "作品描述", "笔记描述"))
+    )
+    title = clean_wechat_text(title).replace(" - 小红书", "").replace(" | 小红书", "").strip()
+    original_text = (
+        first_nested_text(payload, ("desc", "description", "content", "text", "作品描述", "笔记描述"))
+        or title
+    )
+    author = (
+        first_nested_text(payload, ("nickname", "author", "作者昵称", "用户名"))
+        or str(creator.get("name") or creator["key"])
+    )
+    image_urls = nested_media_urls(payload, kind="image")
+    video_urls = [item for item in nested_media_urls(payload, kind="video") if ".m3u8" not in item.lower()]
+    tags = creator.get("tags") or ["xiaohongshu", "图文"]
+    if not isinstance(tags, list):
+        tags = ["xiaohongshu", "图文"]
+    raw = {
+        "original_text": strip_html_text(original_text),
+        "description_text": strip_html_text(original_text),
+        "image_urls": image_urls,
+        "video_url": video_urls[0] if video_urls else "",
+        "xhs_downloader": payload,
+        "xhs_downloader_used": True,
+    }
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=clean_wechat_text(author) or str(creator.get("name") or creator["key"]),
+        video_id=f"xhs_{note_id}",
+        source_url=url,
+        title=compact_title(title or strip_html_text(original_text)[:40] or "小红书笔记", note_id),
+        create_time=nested_timestamp(payload),
+        raw=raw,
+        tags=[str(tag) for tag in tags],
+        platform="xiaohongshu",
+    )
+
+
+async def fetch_xiaohongshu_note_with_xhs_downloader(creator: Dict[str, Any], url: str, config: Dict[str, Any]) -> Optional[CreatorVideo]:
+    downloader = xhs_downloader_config(config)
+    if not downloader["enabled"] or not downloader["api_url"]:
+        return None
+    cookie = read_secret_file(xiaohongshu_cookie_path(config))
+    body: Dict[str, Any] = {
+        "url": url,
+        "download": downloader["download"],
+        "skip": False,
+    }
+    if cookie:
+        body["cookie"] = cookie
+    if downloader["proxy"]:
+        body["proxy"] = downloader["proxy"]
+    timeout = httpx.Timeout(float(downloader["timeout_seconds"]), connect=3.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(str(downloader["api_url"]), json=body)
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict) or not payload:
+        return None
+    return build_xiaohongshu_video_from_payload(creator, url, payload)
+
+
+def extract_xiaohongshu_note_id(url: str) -> str:
+    parsed = urlparse(str(url or ""))
+    for pattern in (r"/explore/([A-Za-z0-9]+)", r"/discovery/item/([A-Za-z0-9]+)", r"/item/([A-Za-z0-9]+)"):
+        match = re.search(pattern, parsed.path)
+        if match:
+            return match.group(1)
+    query = parse_qs(parsed.query)
+    for key in ("note_id", "noteId", "id"):
+        value = str(query.get(key, [""])[0]).strip()
+        if value:
+            return value
+    return ""
+
+
+def xiaohongshu_note_url(note_id: str) -> str:
+    return f"https://www.xiaohongshu.com/explore/{note_id}"
+
+
+def is_xiaohongshu_profile_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    return "xiaohongshu.com" in parsed.netloc and parsed.path.startswith("/user/profile/")
+
+
+def cookie_header_to_playwright_cookies(cookie_header: str, domains: Iterable[str]) -> list[dict[str, Any]]:
+    cookies: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for part in str(cookie_header or "").split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        for domain in domains:
+            key = (domain, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            cookies.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": "/",
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            )
+    return cookies
+
+
+def extract_xiaohongshu_links(html_text: str, base_url: str) -> list[str]:
+    links: list[str] = []
+    for raw in re.findall(r'href=["\']([^"\']+)["\']', html_text or "", flags=re.IGNORECASE):
+        if "/explore/" in raw or "/discovery/item/" in raw:
+            link = urljoin(base_url, html.unescape(raw))
+            if extract_xiaohongshu_note_id(link):
+                links.append(link)
+    for note_id in re.findall(r'/(?:explore|discovery/item)/([A-Za-z0-9]{8,32})', html_text or ""):
+        links.append(xiaohongshu_note_url(note_id))
+    return list(dict.fromkeys(links))
+
+
+def browser_profile_dir(config: Dict[str, Any], platform: str) -> Path:
+    raw = config.get("browser_profiles") if isinstance(config.get("browser_profiles"), dict) else {}
+    value = str(raw.get(platform) or f"local_tools/obsidian_sync/work/browser_profiles/{platform}").strip()
+    return project_path(value)
+
+
+def normalize_xiaohongshu_note_link(url: str) -> str:
+    note_id = extract_xiaohongshu_note_id(url)
+    return xiaohongshu_note_url(note_id) if note_id else ""
+
+
+async def xiaohongshu_page_shows_login(page: Any) -> bool:
+    try:
+        return bool(
+            await asyncio.wait_for(
+                page.evaluate(
+                    """() => {
+                        const el = document.querySelector('#login-btn');
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style && style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+                    }"""
+                ),
+                timeout=2,
+            )
+        )
+    except Exception:
+        return False
+
+
+async def close_xiaohongshu_overlays(page: Any) -> None:
+    try:
+        clicked = await asyncio.wait_for(
+            page.evaluate(
+                """(texts) => {
+                    const nodes = Array.from(document.querySelectorAll('button, [role="button"], .reds-button, .el-button'));
+                    for (const node of nodes) {
+                        const text = (node.innerText || node.textContent || '').trim();
+                        if (!texts.includes(text)) continue;
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        if (style.visibility === 'hidden' || style.display === 'none' || rect.width <= 0 || rect.height <= 0) continue;
+                        node.click();
+                        return true;
+                    }
+                    return false;
+                }""",
+                ["我知道了", "知道了", "同意", "同意并继续"],
+            ),
+            timeout=2,
+        )
+        if clicked:
+            await page.wait_for_timeout(500)
+    except Exception:
+        return
+
+
+async def fetch_xiaohongshu_links_with_browser(
+    creator: Dict[str, Any],
+    url: str,
+    config: Dict[str, Any],
+    scan_limit: int = 0,
+    full_history: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+    run_id: Optional[str] = None,
+) -> list[dict[str, str]]:
+    fetch_cfg = config.get("fetch", {}) if isinstance(config.get("fetch"), dict) else {}
+    cookie_header = read_secret_file(xiaohongshu_cookie_path(config))
+    if not cookie_header or "web_session=" not in cookie_header:
+        raise RuntimeError("小红书 Cookie 缺失。请先在当前 Chrome 登录小红书，再用本项目 Chrome 插件导入小红书 Cookie。")
+    max_items = int(
+        scan_limit
+        or fetch_cfg.get("xiaohongshu_max_notes", 50)
+        or 50
+    )
+    if full_history and not scan_limit:
+        max_items = int(fetch_cfg.get("xiaohongshu_full_max_notes", 1000) or 1000)
+    max_scrolls = int(fetch_cfg.get("xiaohongshu_scroll_pages", 12) or 12)
+    if full_history and not scan_limit:
+        max_scrolls = int(fetch_cfg.get("xiaohongshu_full_scroll_pages", 80) or 80)
+    wait_ms = int(float(fetch_cfg.get("xiaohongshu_scroll_wait_seconds", 1.4) or 1.4) * 1000)
+    headless = bool(fetch_cfg.get("xiaohongshu_browser_headless", False))
+    creator_name = str(creator.get("name") or creator.get("key") or "小红书")
+
+    try:
+        from playwright.async_api import async_playwright
+    except ModuleNotFoundError:
+        print("WARN playwright not installed; skip xiaohongshu browser sniff")
+        return []
+
+    items_by_id: dict[str, dict[str, str]] = {}
+    async with async_playwright() as playwright:
+        browser: Any = None
+        launch_kwargs: dict[str, Any] = {
+            "headless": headless,
+            "timeout": int(float(fetch_cfg.get("xiaohongshu_launch_timeout_seconds", 30) or 30) * 1000),
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        try:
+            try:
+                browser = await playwright.chromium.launch(channel="chrome", **launch_kwargs)
+            except Exception:
+                browser = await playwright.chromium.launch(**launch_kwargs)
+            context = await browser.new_context(
+                viewport={"width": 1440, "height": 1100},
+                user_agent=xiaohongshu_headers(config).get("User-Agent"),
+            )
+            cookies = cookie_header_to_playwright_cookies(
+                cookie_header,
+                [".xiaohongshu.com", "www.xiaohongshu.com", "xiaohongshu.com", ".xhslink.com", "xhslink.com"],
+            )
+            if cookies:
+                await context.add_cookies(cookies)
+        except Exception as exc:
+            raise RuntimeError("小红书临时浏览器会话启动失败。请确认 Chrome 可正常打开，并重新导入小红书 Cookie 后再试。") from exc
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
+            goto_timeout_ms = int(float(fetch_cfg.get("xiaohongshu_goto_timeout_seconds", 25) or 25) * 1000)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=goto_timeout_ms)
+            except Exception as exc:
+                raise RuntimeError(
+                    "小红书页面打开超时。通常是 Cookie 未被页面认可、页面卡在验证，或网络请求被小红书限制；请在当前 Chrome 登录小红书并用插件重新导入 Cookie。"
+                ) from exc
+            await page.wait_for_timeout(2500)
+            await close_xiaohongshu_overlays(page)
+            if await xiaohongshu_page_shows_login(page):
+                raise RuntimeError("小红书 Cookie 未被页面认可：页面仍显示登录按钮。请在当前 Chrome 登录小红书，并用本项目 Chrome 插件重新导入小红书 Cookie。")
+            stable_rounds = 0
+            last_count = 0
+            for scroll_index in range(max_scrolls + 1):
+                if conn and run_id:
+                    update_run(
+                        conn,
+                        run_id,
+                        current_stage=f"浏览器嗅探小红书 {scroll_index + 1}/{max_scrolls + 1}",
+                        current_creator=creator_name,
+                        detected_count=len(items_by_id),
+                    )
+                try:
+                    raw_items = await asyncio.wait_for(
+                        page.evaluate(
+                            """() => Array.from(document.querySelectorAll('a[href]')).map((a) => ({
+                                href: a.href || '',
+                                text: (a.innerText || a.getAttribute('title') || a.getAttribute('aria-label') || '').trim()
+                            }))"""
+                        ),
+                        timeout=5,
+                    )
+                except Exception:
+                    raw_items = []
+                if isinstance(raw_items, list):
+                    for raw in raw_items:
+                        if not isinstance(raw, dict):
+                            continue
+                        link = normalize_xiaohongshu_note_link(str(raw.get("href") or ""))
+                        if not link:
+                            continue
+                        note_id = extract_xiaohongshu_note_id(link)
+                        if not note_id:
+                            continue
+                        title = clean_wechat_text(str(raw.get("text") or "")).splitlines()[0].strip()
+                        items_by_id.setdefault(note_id, {"url": link, "title": title})
+                try:
+                    html_text = await asyncio.wait_for(page.content(), timeout=5)
+                except Exception:
+                    html_text = ""
+                for link in extract_xiaohongshu_links(html_text, str(page.url)):
+                    note_id = extract_xiaohongshu_note_id(link)
+                    if note_id:
+                        items_by_id.setdefault(note_id, {"url": normalize_xiaohongshu_note_link(link), "title": ""})
+                if len(items_by_id) >= max_items:
+                    break
+                if len(items_by_id) == last_count:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                    last_count = len(items_by_id)
+                if stable_rounds >= 6:
+                    break
+                try:
+                    await asyncio.wait_for(page.mouse.wheel(0, 2400), timeout=3)
+                except Exception:
+                    break
+                await page.wait_for_timeout(wait_ms)
+        finally:
+            await context.close()
+            if browser:
+                await browser.close()
+
+    items = list(items_by_id.values())
+    if max_items:
+        items = items[:max_items]
+    return items
+
+
+def extract_media_urls(html_text: str, *, kind: str) -> list[str]:
+    if kind == "video":
+        pattern = r'https?://[^"\'\\\s<>]+(?:mp4|m3u8)[^"\'\\\s<>]*'
+    else:
+        pattern = r'https?://[^"\'\\\s<>]+(?:jpg|jpeg|png|webp)[^"\'\\\s<>]*'
+    urls = []
+    for raw in re.findall(pattern, html_text or "", flags=re.IGNORECASE):
+        value = html.unescape(raw).replace("\\u002F", "/").replace("\\/", "/")
+        if "xhscdn" in value or "xiaohongshu" in value:
+            urls.append(value)
+    return list(dict.fromkeys(urls))
+
+
+def parse_xiaohongshu_note_html(creator: Dict[str, Any], url: str, html_text: str) -> CreatorVideo:
+    note_id = extract_xiaohongshu_note_id(url) or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", flags=re.IGNORECASE | re.DOTALL)
+    title = clean_wechat_text(
+        extract_meta(html_text, "og:title")
+        or extract_meta(html_text, "twitter:title")
+        or (re.sub(r"<[^>]+>", "", title_match.group(1)) if title_match else "")
+    )
+    title = title.replace(" - 小红书", "").replace(" | 小红书", "").strip()
+    description = strip_html_text(
+        extract_meta(html_text, "description")
+        or extract_meta(html_text, "og:description")
+        or extract_meta(html_text, "twitter:description")
+    )
+    names = re.findall(r'"nickname"\s*:\s*"([^"]+)"', html_text or "")
+    creator_name = clean_wechat_text(names[0]) if names else str(creator.get("name") or creator["key"])
+    image_urls = extract_media_urls(html_text, kind="image")
+    video_urls = [url for url in extract_media_urls(html_text, kind="video") if ".m3u8" not in url.lower()]
+    tags = creator.get("tags") or ["xiaohongshu", "图文"]
+    if not isinstance(tags, list):
+        tags = ["xiaohongshu", "图文"]
+    raw = {
+        "original_text": description,
+        "description_text": description,
+        "image_urls": image_urls,
+        "video_url": video_urls[0] if video_urls else "",
+    }
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=creator_name,
+        video_id=f"xhs_{note_id}",
+        source_url=url,
+        title=compact_title(title or description[:40] or "小红书笔记", note_id),
+        create_time=None,
+        raw=raw,
+        tags=[str(tag) for tag in tags],
+        platform="xiaohongshu",
+    )
+
+
+async def fetch_xiaohongshu_note(creator: Dict[str, Any], url: str, config: Dict[str, Any]) -> CreatorVideo:
+    try:
+        video = await fetch_xiaohongshu_note_with_xhs_downloader(creator, url, config)
+        if video:
+            return video
+    except Exception as exc:  # noqa: BLE001 - keep current parser as fallback.
+        print(f"WARN xhs_downloader unavailable, fallback to built-in parser: {type(exc).__name__}: {exc}")
+    timeout = httpx.Timeout(float(config.get("fetch", {}).get("xiaohongshu_timeout_seconds", 30)), connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(url, headers=xiaohongshu_headers(config, url), follow_redirects=True)
+        response.raise_for_status()
+        final_url = str(response.url)
+        if "/404" in urlparse(final_url).path or "你访问的页面不见了" in response.text[:5000]:
+            raise RuntimeError("小红书详情页返回 404/验证页，请用 Chrome 插件在真实页面收集候选链接后再抓取")
+        return parse_xiaohongshu_note_html(creator, final_url, response.text)
+
+
+def xiaohongshu_placeholder_video(creator: Dict[str, Any], url: str, title: str = "") -> CreatorVideo:
+    note_id = extract_xiaohongshu_note_id(url) or hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    tags = creator.get("tags") or ["xiaohongshu", "图文"]
+    if not isinstance(tags, list):
+        tags = ["xiaohongshu", "图文"]
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=str(creator.get("name") or creator["key"]),
+        video_id=f"xhs_{note_id}",
+        source_url=url,
+        title=compact_title(title or f"小红书笔记 {note_id}", note_id),
+        create_time=None,
+        raw={
+            "original_text": "",
+            "image_urls": [],
+            "video_url": "",
+            "manual_candidate": True,
+        },
+        tags=[str(tag) for tag in tags],
+        platform="xiaohongshu",
+    )
+
+
+async def fetch_xiaohongshu_notes(
+    creator: Dict[str, Any],
+    config: Dict[str, Any],
+    scan_limit: int = 0,
+    full_history: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+    run_id: Optional[str] = None,
+) -> List[CreatorVideo]:
+    url = str(creator.get("url") or "").strip()
+    manual_items = creator.get("manual_items") or []
+    if isinstance(manual_items, list) and manual_items:
+        links = []
+        title_by_url: dict[str, str] = {}
+        for item in manual_items:
+            if not isinstance(item, dict):
+                continue
+            item_url = str(item.get("url") or "").strip()
+            if not item_url:
+                continue
+            links.append(item_url)
+            title_by_url[item_url] = clean_wechat_text(str(item.get("title") or ""))
+        if scan_limit:
+            links = links[:scan_limit]
+        videos: List[CreatorVideo] = []
+        seen: set[str] = set()
+        for link in links:
+            video = xiaohongshu_placeholder_video(creator, link, title_by_url.get(link, ""))
+            if video.video_id not in seen:
+                videos.append(video)
+                seen.add(video.video_id)
+        return videos
+
+    manual_urls = creator.get("manual_urls") or []
+    if isinstance(manual_urls, str):
+        manual_urls = [item.strip() for item in manual_urls.splitlines() if item.strip()]
+    if isinstance(manual_urls, list) and manual_urls:
+        links = [str(item).strip() for item in manual_urls if str(item).strip()]
+        if scan_limit:
+            links = links[:scan_limit]
+        videos = []
+        seen = set()
+        for link in links:
+            video = xiaohongshu_placeholder_video(creator, link)
+            if video.video_id not in seen:
+                videos.append(video)
+                seen.add(video.video_id)
+        return videos
+    else:
+        links = []
+    if not links:
+        browser_items = await fetch_xiaohongshu_links_with_browser(
+            creator,
+            url,
+            config,
+            scan_limit,
+            full_history,
+            conn,
+            run_id,
+        )
+        if browser_items:
+            videos = []
+            seen = set()
+            for item in browser_items:
+                link = str(item.get("url") or "").strip()
+                if not link:
+                    continue
+                video = xiaohongshu_placeholder_video(creator, link, str(item.get("title") or ""))
+                if video.video_id not in seen:
+                    videos.append(video)
+                    seen.add(video.video_id)
+            return videos
+        if is_xiaohongshu_profile_url(url):
+            raise RuntimeError(
+                "小红书页面已打开，但没有嗅探到任何笔记。通常是当前浏览器登录态未被小红书认可、页面卡在验证，"
+                "或瀑布流没有正常渲染；请在当前 Chrome 确认小红书已登录，并用本项目 Chrome 插件重新导入小红书 Cookie。"
+            )
+        timeout = httpx.Timeout(float(config.get("fetch", {}).get("xiaohongshu_timeout_seconds", 30)), connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url, headers=xiaohongshu_headers(config, url), follow_redirects=True)
+            response.raise_for_status()
+            final_url = str(response.url)
+            html_text = response.text
+        if extract_xiaohongshu_note_id(final_url):
+            return [parse_xiaohongshu_note_html(creator, final_url, html_text)]
+        links = extract_xiaohongshu_links(html_text, final_url)
+        if scan_limit:
+            links = links[:scan_limit]
+        elif not full_history:
+            links = links[: int(config.get("fetch", {}).get("xiaohongshu_max_notes", 50))]
+    videos: List[CreatorVideo] = []
+    seen: set[str] = set()
+    delay = float(config.get("fetch", {}).get("xiaohongshu_delay_seconds", config.get("fetch", {}).get("delay_seconds", 2)))
+    for index, link in enumerate(links, start=1):
+        if conn and run_id:
+            update_run(conn, run_id, current_stage=f"嗅探小红书 {index}/{len(links)}", detected_count=len(videos))
+        video = xiaohongshu_placeholder_video(creator, link)
+        if video.video_id not in seen:
+            videos.append(video)
+            seen.add(video.video_id)
+        if delay > 0 and index < len(links):
+            await asyncio.sleep(delay)
+    return videos
+
+
+def build_platform_registry() -> PlatformRegistry:
+    registry = PlatformRegistry()
+    registry.register(
+        XiaohongshuCrawler(
+            sniff_notes=fetch_xiaohongshu_notes,
+            fetch_note=fetch_xiaohongshu_note,
+        )
+    )
+    return registry
 
 
 def extract_weibo_uid_from_url(url: str) -> str:
@@ -1477,6 +2387,18 @@ async def fetch_creator_videos(
     run_id: Optional[str] = None,
 ) -> List[CreatorVideo]:
     platform = creator_platform(creator)
+    registry = build_platform_registry()
+    if registry.has(platform):
+        return await registry.get(platform).sniff(
+            creator,
+            PlatformRunContext(
+                config=config,
+                scan_limit=scan_limit,
+                full_history=full_history,
+                conn=conn,
+                run_id=run_id,
+            ),
+        )
     if platform == "weibo":
         return await fetch_weibo_posts(creator, config, scan_limit, full_history, conn, run_id)
     if platform == "xiaoyuzhou":
@@ -1755,6 +2677,16 @@ def summary_user_content(video: CreatorVideo, transcript: str) -> str:
             "逐字稿：\n"
             f"{transcript}"
         )
+    if video.platform == "xiaohongshu":
+        return (
+            "小红书笔记元数据：\n"
+            f"- 作者：{video.creator_name}\n"
+            f"- 标题：{video.title}\n"
+            f"- 链接：{video.source_url}\n"
+            f"- 发布时间：{published}\n\n"
+            "原文/逐字稿：\n"
+            f"{transcript}"
+        )
     return (
         "视频元数据：\n"
         f"- 博主：{video.creator_name}\n"
@@ -1946,7 +2878,7 @@ def build_frontmatter(video: CreatorVideo, status: str) -> str:
     )
 
 
-def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
     frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"抖音视频 {video.video_id}"
     parts = [
@@ -1956,23 +2888,24 @@ def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, st
     ]
     if summary.strip():
         parts.append(f"{summary.strip()}\n\n")
-    parts.append("## 逐字稿\n\n")
-    parts.append(f"{transcript.strip()}\n")
+    if include_transcript:
+        parts.append("## 逐字稿\n\n")
+        parts.append(f"{transcript.strip()}\n")
     if status == "raw":
         parts.append("\n## 笔记\n\n<!-- Claudian: 在此处生成结构化总结 -->\n")
     return "".join(parts)
 
 
-def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, status: str) -> str:
+def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, status: str, include_transcript: bool = True) -> str:
     frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"微博 {format_date(video.create_time)}"
     parts = [
         frontmatter,
         f"# {title}\n\n",
         f"[原微博]({video.source_url})\n\n",
-        "## 原文\n\n",
-        f"{original_text.strip()}\n\n",
     ]
+    if include_transcript:
+        parts.extend(["## 原文\n\n", f"{original_text.strip()}\n\n"])
     summary = summary.strip()
     if summary:
         parts.append(f"{summary}\n\n")
@@ -1986,7 +2919,7 @@ def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, 
     return "".join(parts)
 
 
-def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str, status: str) -> str:
+def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str, status: str, include_transcript: bool = True) -> str:
     frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"公众号文章 {format_date(video.create_time)}"
     description = str(video.raw.get("description_text") or "").strip()
@@ -2000,8 +2933,9 @@ def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str,
     summary = summary.strip()
     if summary:
         parts.append(f"{summary}\n\n")
-    parts.append("## 原文\n\n")
-    parts.append(f"{original_text.strip()}\n\n")
+    if include_transcript:
+        parts.append("## 原文\n\n")
+        parts.append(f"{original_text.strip()}\n\n")
     parts.append("## 笔记\n\n")
     if status == "raw":
         parts.append("<!-- Claudian: 在此处生成结构化总结 -->\n\n")
@@ -2012,7 +2946,7 @@ def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str,
     return "".join(parts)
 
 
-def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
     frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"播客单集 {format_date(video.create_time)}"
     description = str(video.raw.get("description_text") or "").strip()
@@ -2025,21 +2959,53 @@ def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, s
     ]
     if summary.strip():
         parts.append(f"{summary.strip()}\n\n")
-    parts.append("## 逐字稿\n\n")
-    parts.append(f"{transcript.strip()}\n")
+    if include_transcript:
+        parts.append("## 逐字稿\n\n")
+        parts.append(f"{transcript.strip()}\n")
     if status == "raw":
         parts.append("\n## 笔记\n\n<!-- Claudian: 在此处生成结构化总结 -->\n")
     return "".join(parts)
 
 
-def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: str) -> str:
+def build_xiaohongshu_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
+    frontmatter = build_frontmatter(video, status)
+    title = video.title if video.title != video.video_id else f"小红书笔记 {format_date(video.create_time)}"
+    original_text = str(video.raw.get("original_text") or "").strip()
+    image_paths = [str(item) for item in (video.raw.get("image_local_paths") or []) if str(item).strip()]
+    video_transcript = transcript.strip()
+    parts = [
+        frontmatter,
+        f"# {title}\n\n",
+        f"[原笔记]({video.source_url})\n\n",
+    ]
+    if include_transcript and original_text:
+        parts.extend(["## 原文\n\n", f"{original_text}\n\n"])
+    if image_paths:
+        parts.append("## 图片\n\n")
+        for path in image_paths:
+            parts.append(f"![]({path})\n\n")
+    if video_transcript and video_transcript != original_text:
+        parts.extend(["## 视频逐字稿\n\n", f"{video_transcript}\n\n"])
+    summary = summary.strip()
+    if summary:
+        parts.append(f"{summary}\n\n")
+    parts.append("## 笔记\n\n")
+    parts.append("<!-- 在这里补充自己的理解、可复用表达或二创角度。 -->\n\n")
+    parts.append("## 相关链接\n\n")
+    parts.append(f"- 原笔记：{video.source_url}\n")
+    return "".join(parts)
+
+
+def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
     if video.platform == "weibo":
-        return build_weibo_markdown(video, summary, transcript, status)
+        return build_weibo_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "wechat":
-        return build_wechat_markdown(video, summary, transcript, status)
+        return build_wechat_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "xiaoyuzhou":
-        return build_podcast_markdown(video, summary, transcript, status)
-    return build_douyin_markdown(video, summary, transcript, status)
+        return build_podcast_markdown(video, summary, transcript, status, include_transcript)
+    if video.platform == "xiaohongshu":
+        return build_xiaohongshu_markdown(video, summary, transcript, status, include_transcript)
+    return build_douyin_markdown(video, summary, transcript, status, include_transcript)
 
 
 def output_path_for_video(base_dir: Path, video: CreatorVideo, conn: Optional[sqlite3.Connection] = None) -> Path:
@@ -2069,6 +3035,97 @@ def atomic_write(path: Path, text: str) -> None:
         handle.write(text)
         temp_name = handle.name
     Path(temp_name).replace(path)
+
+
+def retention_config(config: Dict[str, Any]) -> Dict[str, bool]:
+    defaults = {
+        "keep_video": False,
+        "keep_audio": False,
+        "save_transcript_txt": False,
+        "save_source_raw": False,
+        "include_transcript_in_markdown": True,
+    }
+    raw = config.get("retention")
+    if isinstance(raw, dict):
+        for key in defaults:
+            if key in raw:
+                defaults[key] = bool(raw.get(key))
+    return defaults
+
+
+def sidecar_path(markdown_path: Path, label: str, suffix: str) -> Path:
+    return markdown_path.with_name(f"{markdown_path.stem}.{label}{suffix}")
+
+
+def retain_processing_outputs(
+    *,
+    video: CreatorVideo,
+    markdown_path: Path,
+    transcript: str,
+    source_media_path: Optional[Path],
+    audio_path: Optional[Path],
+    retention: Dict[str, bool],
+) -> set[Path]:
+    retained: set[Path] = set()
+    if retention.get("save_transcript_txt"):
+        transcript_path = sidecar_path(markdown_path, "transcript", ".txt")
+        atomic_write(transcript_path, transcript.strip() + "\n")
+        retained.add(transcript_path)
+    if retention.get("save_source_raw"):
+        source_path = sidecar_path(markdown_path, "source", ".json")
+        atomic_write(source_path, json.dumps(video.raw, ensure_ascii=False, indent=2, default=str) + "\n")
+        retained.add(source_path)
+    if retention.get("keep_video") and video.platform in {"douyin", "xiaohongshu"} and source_media_path and source_media_path.exists():
+        target = sidecar_path(markdown_path, "video", source_media_path.suffix or ".mp4")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source_media_path), str(target))
+        retained.add(target)
+    if retention.get("keep_audio"):
+        if source_media_path and source_media_path.exists() and video.platform == "xiaoyuzhou":
+            target = sidecar_path(markdown_path, "source-audio", source_media_path.suffix or ".audio")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source_media_path), str(target))
+            retained.add(target)
+        if audio_path and audio_path.exists():
+            target = sidecar_path(markdown_path, "audio", audio_path.suffix or ".wav")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(audio_path), str(target))
+            retained.add(target)
+    return retained
+
+
+async def download_xiaohongshu_images(video: CreatorVideo, config: Dict[str, Any], markdown_path: Path) -> list[str]:
+    urls = [str(item) for item in (video.raw.get("image_urls") or []) if str(item).startswith("http")]
+    if not urls:
+        return []
+    asset_dir = markdown_path.with_name(f"{markdown_path.stem}.assets")
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    headers = xiaohongshu_headers(config, video.source_url)
+    timeout = httpx.Timeout(float(config.get("download", {}).get("timeout_seconds", 120)), connect=10.0)
+    saved: list[str] = []
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for index, url in enumerate(urls, start=1):
+            suffix_match = re.search(r"\.(jpg|jpeg|png|webp|heic)(?:\?|$)", url, re.IGNORECASE)
+            suffix = f".{suffix_match.group(1).lower()}" if suffix_match else ".jpg"
+            target = asset_dir / f"image-{index:02d}{suffix}"
+            try:
+                response = await client.get(url, headers=headers, follow_redirects=True)
+                response.raise_for_status()
+                target.write_bytes(response.content)
+                saved.append(str(Path(asset_dir.name) / target.name))
+            except Exception as exc:  # noqa: BLE001
+                print(f"WARN xiaohongshu image download failed {video.video_id} {url}: {type(exc).__name__}: {exc}")
+    return saved
+
+
+async def download_xiaohongshu_video_to_temp(video: CreatorVideo, config: Dict[str, Any], temp_dir: Path) -> Path:
+    video_url = str(video.raw.get("video_url") or "").strip()
+    if not video_url:
+        raise RuntimeError("小红书视频链接为空")
+    target = temp_dir / f"{video.video_id}.mp4"
+    headers = xiaohongshu_headers(config, video.source_url)
+    await stream_to_file(video_url, target, headers, float(config.get("download", {}).get("timeout_seconds", 120)))
+    return target
 
 
 def configured_concurrency(config: Dict[str, Any], cli_value: Optional[int]) -> int:
@@ -2105,6 +3162,8 @@ async def process_video(
     work_dir = project_path(str(config.get("work_dir", "local_tools/obsidian_sync/work")))
     media_dir = work_dir / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
+    retention = retention_config(config)
+    include_transcript = retention.get("include_transcript_in_markdown", True)
     video_path: Optional[Path] = None
     audio_path: Optional[Path] = None
 
@@ -2116,6 +3175,20 @@ async def process_video(
                 update_run(conn, run_id, current_stage=f"读取{source_label}正文", current_creator=video.creator_name, current_video_id=video.video_id)
                 upsert_run_item(conn, run_id, video, "running", f"读取{source_label}正文")
             transcript = str(video.raw.get("original_text") or "").strip()
+            if not transcript and video.platform == "wechat" and "mp.weixin.qq.com" in video.source_url:
+                fetched = await fetch_wechat_article(
+                    {
+                        "key": video.creator_key,
+                        "name": video.creator_name,
+                        "tags": video.tags,
+                    },
+                    video.source_url,
+                    config,
+                )
+                video.raw.update(fetched.raw)
+                video.title = fetched.title or video.title
+                video.create_time = fetched.create_time or video.create_time
+                transcript = str(video.raw.get("original_text") or "").strip()
             if not transcript:
                 raise RuntimeError(f"{source_label}正文为空")
 
@@ -2136,14 +3209,88 @@ async def process_video(
             if run_id:
                 update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
                 upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
-            markdown = build_markdown(video, summary, transcript, status)
+            markdown = build_markdown(video, summary, transcript, status, include_transcript)
             markdown_path = output_path_for_video(output_base, video, conn)
             atomic_write(markdown_path, markdown)
+            retain_processing_outputs(
+                video=video,
+                markdown_path=markdown_path,
+                transcript=transcript,
+                source_media_path=None,
+                audio_path=None,
+                retention=retention,
+            )
             is_success = status in ("ok", "raw")
             mark_result(conn, video, status, markdown_path, None if is_success else "summary failed", len(transcript))
             if run_id:
                 item_status = "success" if is_success else "failed"
                 item_error = None if is_success else f"AI 总结失败，但{source_label}原文已写入 Markdown"
+                upsert_run_item(conn, run_id, video, item_status, "完成", item_error, markdown_path)
+            print(f"WROTE {markdown_path}")
+            return status
+
+        if video.platform == "xiaohongshu":
+            if run_id:
+                update_run(conn, run_id, current_stage="读取小红书笔记", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "读取小红书笔记")
+            video = await build_platform_registry().get("xiaohongshu").hydrate(
+                video,
+                PlatformRunContext(config=config, conn=conn, run_id=run_id),
+            )
+            note_text = str(video.raw.get("original_text") or "").strip()
+            transcript = note_text
+            if video.raw.get("video_url"):
+                if run_id:
+                    update_run(conn, run_id, current_stage="下载小红书视频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "下载小红书视频")
+                video_path = await download_xiaohongshu_video_to_temp(video, config, media_dir)
+                if run_id:
+                    update_run(conn, run_id, current_stage="提取音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "提取音频")
+                audio_path = media_dir / f"{video.video_id}.wav"
+                await asyncio.to_thread(extract_audio, video_path, audio_path)
+                if run_id:
+                    update_run(conn, run_id, current_stage="转录小红书视频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "转录小红书视频")
+                video_transcript = await asyncio.to_thread(transcribe_audio, audio_path, config.get("transcribe", {}))
+                transcript = "\n\n".join(part for part in [note_text, video_transcript] if part.strip())
+            if not transcript.strip():
+                raise RuntimeError("小红书原文/逐字稿为空")
+
+            markdown_path = output_path_for_video(output_base, video, conn)
+            image_paths = await download_xiaohongshu_images(video, config, markdown_path)
+            video.raw["image_local_paths"] = image_paths
+            if skip_summary:
+                summary = ""
+                status = "raw"
+            else:
+                try:
+                    if run_id:
+                        update_run(conn, run_id, current_stage="AI 总结", current_creator=video.creator_name, current_video_id=video.video_id)
+                        upsert_run_item(conn, run_id, video, "running", "AI 总结")
+                    summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, summary_config_for_video(video, config))
+                    status = "ok"
+                except Exception as exc:  # noqa: BLE001
+                    summary = f"## 要点\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
+                    status = "summary_error"
+            if run_id:
+                update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
+            markdown = build_markdown(video, summary, transcript, status, include_transcript)
+            atomic_write(markdown_path, markdown)
+            retain_processing_outputs(
+                video=video,
+                markdown_path=markdown_path,
+                transcript=transcript,
+                source_media_path=video_path,
+                audio_path=audio_path,
+                retention=retention,
+            )
+            is_success = status in ("ok", "raw")
+            mark_result(conn, video, status, markdown_path, None if is_success else "summary failed", len(transcript))
+            if run_id:
+                item_status = "success" if is_success else "failed"
+                item_error = None if is_success else "AI 总结失败，但小红书原文/逐字稿已写入 Markdown"
                 upsert_run_item(conn, run_id, video, item_status, "完成", item_error, markdown_path)
             print(f"WROTE {markdown_path}")
             return status
@@ -2192,9 +3339,17 @@ async def process_video(
             if run_id:
                 update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
                 upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
-            markdown = build_markdown(video, summary, transcript, status)
+            markdown = build_markdown(video, summary, transcript, status, include_transcript)
             markdown_path = output_path_for_video(output_base, video, conn)
             atomic_write(markdown_path, markdown)
+            retain_processing_outputs(
+                video=video,
+                markdown_path=markdown_path,
+                transcript=transcript,
+                source_media_path=video_path,
+                audio_path=audio_path,
+                retention=retention,
+            )
             is_success = status in ("ok", "raw")
             mark_result(conn, video, status, markdown_path, None if is_success else "summary failed", len(transcript))
             if run_id:
@@ -2235,9 +3390,17 @@ async def process_video(
         if run_id:
             update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
             upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
-        markdown = build_markdown(video, summary, transcript, status)
+        markdown = build_markdown(video, summary, transcript, status, include_transcript)
         markdown_path = output_path_for_video(output_base, video, conn)
         atomic_write(markdown_path, markdown)
+        retain_processing_outputs(
+            video=video,
+            markdown_path=markdown_path,
+            transcript=transcript,
+            source_media_path=video_path,
+            audio_path=audio_path,
+            retention=retention,
+        )
         is_success = status in ("ok", "raw")
         mark_result(conn, video, status, markdown_path, None if is_success else "summary failed", len(transcript))
         if run_id:
@@ -2267,8 +3430,6 @@ async def sync(args: argparse.Namespace) -> int:
     config_path = project_path(str(args.config))
     config = load_yaml(config_path)
     load_env_file(project_path(str(config.get("env_file", "local_tools/obsidian_sync/.env"))))
-
-    apply_cookie_for_creator(config)
 
     from crawlers.hybrid.hybrid_crawler import HybridCrawler
 
@@ -2325,12 +3486,20 @@ async def sync(args: argparse.Namespace) -> int:
             creator_name = creator.get("name") or creator.get("key")
             platform = creator_platform(creator)
             output_base = output_base_for_platform(vault_path, config, platform)
+            prerequisite_error = creator_prerequisite_error(config, creator)
+            if prerequisite_error:
+                if args.creator:
+                    raise RuntimeError(prerequisite_error)
+                had_errors = True
+                print(f"SKIP {creator_name} {prerequisite_error}")
+                update_run(conn, run_id, current_stage="跳过未登录来源", current_creator=str(creator_name), current_video_id="", error=prerequisite_error)
+                continue
             apply_cookie_for_creator(config, creator)
             update_run(conn, run_id, current_stage="嗅探内容", current_creator=str(creator_name), current_video_id="")
             print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
             print(f"OUTPUT {platform} {output_base}")
             print(f"FETCH {creator_name}")
-            scan_limit = int(args.limit or 0) if platform in {"weibo", "xiaoyuzhou", "wechat"} and not args.full_history else 0
+            scan_limit = int(args.limit or 0) if platform in {"weibo", "xiaoyuzhou", "wechat", "xiaohongshu"} and not args.full_history else 0
             videos = await fetch_creator_videos(crawler, creator, config, scan_limit, args.full_history, conn, run_id)
             total_seen += len(videos)
             update_run(conn, run_id, detected_count=total_seen)
@@ -2340,6 +3509,8 @@ async def sync(args: argparse.Namespace) -> int:
                 item_label = "episodes"
             elif platform == "wechat":
                 item_label = "articles"
+            elif platform == "xiaohongshu":
+                item_label = "notes"
             else:
                 item_label = "videos"
             print(f"FOUND {len(videos)} {item_label}")
@@ -2394,7 +3565,7 @@ async def sync(args: argparse.Namespace) -> int:
                         video=video,
                         config=config,
                         output_base=output_base,
-                        skip_summary=not args.with_deepseek,
+                        skip_summary=args.skip_summary or not args.with_deepseek,
                         no_cleanup=args.no_cleanup,
                         run_id=run_id,
                     )
@@ -2430,10 +3601,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=0, help="Process at most N new videos per creator.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and list candidates without downloading.")
     parser.add_argument("--force", action="store_true", help="Reprocess videos already marked ok.")
-    parser.add_argument("--skip-summary", action="store_true", default=True,
-                        help="(Default) Write raw notes without AI summary; intended for Claudian in Obsidian.")
-    parser.add_argument("--with-deepseek", action="store_true",
-                        help="Call DeepSeek API for summaries (legacy behaviour).")
+    parser.add_argument("--skip-summary", action="store_true",
+                        help="Write raw notes without AI summary.")
+    parser.add_argument("--with-deepseek", action="store_true", default=True,
+                        help="Call DeepSeek API for summaries. This is the default dashboard behaviour.")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep temporary video/audio files for debugging.")
     parser.add_argument("--run-id", default=None, help="Stable run id for dashboard tracking.")
     parser.add_argument("--concurrency", type=int, default=None, help="Parallel video pipelines per creator. Clamped to 1-2.")
@@ -2442,7 +3613,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    return asyncio.run(sync(parse_args()))
+    try:
+        return asyncio.run(sync(parse_args()))
+    except Exception as exc:  # noqa: BLE001 - dashboard should show the concise user-facing failure.
+        if os.environ.get("OBSIDIAN_SYNC_DEBUG"):
+            raise
+        print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return 1
 
 
 if __name__ == "__main__":

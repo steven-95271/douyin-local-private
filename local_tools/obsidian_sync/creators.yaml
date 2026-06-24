@@ -4,14 +4,33 @@ state_db: local_tools/obsidian_sync/state.sqlite
 work_dir: local_tools/obsidian_sync/work
 env_file: local_tools/obsidian_sync/.env
 douyin_cookie_file: local_tools/douyin_cookie.txt
+weibo_cookie_file: local_tools/weibo_cookie.txt
+wechat_mp_cookie_file: local_tools/wechat_mp_cookie.txt
+wechat_mp_token_file: local_tools/wechat_mp_token.txt
+xiaohongshu_cookie_file: local_tools/xiaohongshu_cookie.txt
 fetch:
   count_per_page: 20
   max_pages: 50
+  wechat_mp_count_per_page: 5
+  wechat_mp_max_pages: 10
+  wechat_mp_full_max_pages: 1000
+  wechat_mp_delay_seconds: 3
   delay_seconds: 2
+xhs_downloader:
+  enabled: true
+  api_url: http://127.0.0.1:5556/xhs/detail
+  download: false
+  timeout_seconds: 30
 download:
   watermark: keep
   timeout_seconds: 120
   cleanup_media: true
+retention:
+  keep_video: false
+  keep_audio: false
+  save_transcript_txt: false
+  save_source_raw: false
+  include_transcript_in_markdown: true
 transcribe:
   provider: faster_whisper
   model: small
@@ -36,12 +55,6 @@ podcast_summary:
   chunk_chars: 45000
   chunk_max_tokens: 2500
   podcast_prompt: local_tools/obsidian_sync/prompts/podcast_summarize.md
-creative:
-  model: deepseek-v4-pro
-  temperature: 0.45
-  max_tokens: 7000
-  max_scan: 300
-  excerpt_chars: 4500
 weekly_report:
   output_subdir: Douyin/周报
   telegram:
@@ -52,7 +65,8 @@ weekly_report:
     max_chars: 3500
   hermes:
     enabled: true
-    profile: telegram2
+    profile: secretary
+    bot_username: '@Steven_Secretary_bot'
     timeout_seconds: 120
 creators:
 - key: bgrj
@@ -205,11 +219,102 @@ creators:
     【合作】 商务联系 studyroom@fit4life.world'
   platform_id: 65a5fb7540d4ef949c0140ac
   xiaoyuzhou_pid: 65a5fb7540d4ef949c0140ac
+- key: gg
+  platform: wechat
+  name: 逛逛GitHub
+  url: https://mp.weixin.qq.com/cgi-bin/appmsgpublish?fakeid=MzUxNjg4NDEzNA%3D%3D
+  enabled: true
+  tags:
+  - wechat
+  - 公众号
+  - 科技产品
+  category: 科技产品
+  language: 中文
+  content_type: 公众号文章
+  bio: 热门「开源项目」推送到你眼前，每日为你节省 1 小时。 给我发消息可咨询各种开源项目，专注 AI、硬科技开源领域。
+  platform_id: MzUxNjg4NDEzNA==
+  wechat_biz: MzUxNjg4NDEzNA==
+  wechat_fakeid: MzUxNjg4NDEzNA==
+- key: yzddkjdszh
+  platform: xiaohongshu
+  name: 尤总点灯：跨境电商智慧
+  url: https://www.xiaohongshu.com/user/profile/648686db000000001c02b9b3?xsec_token=ABodTjIxpnQ4GyFBlWltit6yTgGRZZ5cjYONm_AscNYHs=&xsec_source=pc_search
+  enabled: true
+  tags:
+  - xiaohongshu
+  - 图文
+  - 综合
+  category: 综合
+  language: 中文
+  content_type: 图文/视频
+  platform_id: 648686db000000001c02b9b3
+- key: jsa
+  platform: xiaohongshu
+  name: AI金三啊
+  url: https://www.xiaohongshu.com/user/profile/5886ac726a6a6965bbeaaded?xsec_token=ABz1LLDXj4oxH7MFR9YjT2CVjt8V5rhWgU25cSBG22dDw=&xsec_source=pc_search
+  enabled: true
+  tags:
+  - xiaohongshu
+  - 图文
+  - 科技产品
+  category: 科技产品
+  language: 中文
+  content_type: 图文/视频
+  platform_id: 5886ac726a6a6965bbeaaded
+- key: zlzqdxj
+  platform: wechat
+  name: 走来走去的F小姐
+  url: https://mp.weixin.qq.com/cgi-bin/appmsgpublish?fakeid=MzI0NzY0NzM2Nw%3D%3D
+  enabled: true
+  tags:
+  - wechat
+  - 公众号
+  - 综合
+  category: 人文历史
+  language: 中文
+  content_type: 公众号文章
+  bio: 听众朋友们大家好，您现在收听到的依然是……
+  platform_id: MzI0NzY0NzM2Nw==
+  wechat_biz: MzI0NzY0NzM2Nw==
+  wechat_fakeid: MzI0NzY0NzM2Nw==
+- key: bfxr
+  platform: wechat
+  name: 半佛仙人
+  url: https://mp.weixin.qq.com/cgi-bin/appmsgpublish?fakeid=MzkyMTY0MzkyMg%3D%3D
+  enabled: true
+  tags:
+  - wechat
+  - 公众号
+  - 科技产品
+  category: 科技产品
+  language: 中文
+  content_type: 公众号文章
+  bio: 半佛仙人那些疯癫又暴躁的灵魂文章。
+  platform_id: MzkyMTY0MzkyMg==
+  wechat_biz: MzkyMTY0MzkyMg==
+  wechat_fakeid: MzkyMTY0MzkyMg==
+- key: aj
+  platform: douyin
+  name: Ange安久
+  url: https://douyin.com/user/MS4wLjABAAAA9ELz_fQinVyTHnCNVV7jvAIglyX82pWruJN08HyWRDo3yW9KsPsVvn1LMbOqdG6Z?enter_from=general_search&enter_method=general_search&extra_params=%7B"search_params"%3A%7B"search_result_id"%3A"3562867826370791"%2C"relation_tag"%3A1%2C"log_pb"%3A%7B"impr_id"%3A"202606242207270B013B2EB6241E1061D7"%7D%2C"search_type"%3A"general"%2C"impr_id"%3A"202606242207270B013B2EB6241E1061D7"%2C"search_id"%3A"202606242207270B013B2EB6241E1061D7"%2C"search_keyword"%3A"安久"%2C"token_type"%3A"discover_list"%7D%7D&from_tab_name=main
+  enabled: true
+  tags:
+  - douyin
+  - 口播
+  - 投资商业
+  category: 投资商业
+  language: 中文
+  content_type: 口播
+  sec_user_id: MS4wLjABAAAA9ELz_fQinVyTHnCNVV7jvAIglyX82pWruJN08HyWRDo3yW9KsPsVvn1LMbOqdG6Z
 output_subdirs:
   douyin: Douyin/口播博主
   weibo: Weibo/内容源
   xiaoyuzhou: Podcast/小宇宙
   wechat: WeChat/公众号
+  xiaohongshu: Xiaohongshu/内容源
   youtube: YouTube/视频博主
   bilibili: Bilibili/视频博主
   tiktok: TikTok/视频博主
+  kuaishou: Kuaishou/视频博主
+  tieba: Tieba/贴吧
+  zhihu: Zhihu/内容源

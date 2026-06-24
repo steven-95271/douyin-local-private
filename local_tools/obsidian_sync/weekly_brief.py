@@ -257,8 +257,9 @@ def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dr
     if not hermes_cfg.get("enabled", True):
         print("HERMES disabled")
         return 0
+    bot_username = str(hermes_cfg.get("bot_username") or "@Steven_Secretary_bot").strip()
     prompt = (
-        "请把下面这份周报精简内容发送到我已经接入的 Telegram。"
+        f"请通过 Telegram 机器人 {bot_username} 把下面这份周报精简内容发送给我。"
         "只发送正文，不需要解释。"
         f"\n\n完整周报本地路径：{report_path}\n\n{message}"
     )

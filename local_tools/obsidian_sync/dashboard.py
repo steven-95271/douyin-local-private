@@ -11,12 +11,14 @@ import argparse
 import asyncio
 import hashlib
 import html
+import importlib.util
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,17 +33,33 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml"
-KNOWN_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat", "youtube", "bilibili", "tiktok"}
-PLATFORM_ORDER = ["douyin", "weibo", "xiaoyuzhou", "wechat", "youtube", "bilibili", "tiktok"]
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat"}
-CREATIVE_SOURCE_PLATFORMS = ["douyin", "weibo", "xiaoyuzhou", "wechat"]
-CREATIVE_FORMAT_LABELS = {
-    "all": "全平台草稿",
-    "xiaohongshu": "小红书图文",
-    "douyin_dialogue": "抖音对谈脚本",
-    "twitter": "Twitter-X",
-    "wechat_article": "公众号文章",
+KNOWN_PLATFORMS = {
+    "douyin",
+    "weibo",
+    "xiaoyuzhou",
+    "wechat",
+    "xiaohongshu",
+    "youtube",
+    "bilibili",
+    "tiktok",
+    "kuaishou",
+    "tieba",
+    "zhihu",
 }
+PLATFORM_ORDER = [
+    "douyin",
+    "weibo",
+    "xiaoyuzhou",
+    "wechat",
+    "xiaohongshu",
+    "youtube",
+    "bilibili",
+    "tiktok",
+    "kuaishou",
+    "tieba",
+    "zhihu",
+]
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat", "xiaohongshu"}
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -49,6 +67,7 @@ settings: Optional[argparse.Namespace] = None
 worker_process: Optional[subprocess.Popen] = None
 worker_log: Optional[Path] = None
 worker_run_id: Optional[str] = None
+browser_login_processes: Dict[str, subprocess.Popen] = {}
 
 
 def utc_now() -> str:
@@ -108,6 +127,61 @@ def cookie_status(path: Path) -> Dict[str, Any]:
     status["login_ready"] = has_login
     status["ready"] = has_login
     return status
+
+
+def xiaohongshu_cookie_status(path: Path) -> Dict[str, Any]:
+    status = file_ready(path, ["paste_your", "PASTE_YOUR"])
+    if not status["ready"]:
+        status["login_ready"] = False
+        return status
+    text = path.read_text(encoding="utf-8").strip()
+    has_login = "web_session=" in text
+    status["login_ready"] = has_login
+    status["ready"] = has_login
+    return status
+
+
+def browser_login_profile_dir(data: Dict[str, Any], platform: str) -> Path:
+    raw = data.get("browser_profiles") if isinstance(data.get("browser_profiles"), dict) else {}
+    value = str(raw.get(platform) or f"local_tools/obsidian_sync/work/browser_profiles/{platform}").strip()
+    return project_path(value)
+
+
+def browser_login_status_file(data: Dict[str, Any], platform: str) -> Path:
+    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    return work_dir / "browser_login" / f"{platform}.json"
+
+
+def browser_login_entry_url(platform: str) -> str:
+    if platform == "douyin":
+        return "https://www.douyin.com/"
+    if platform == "xiaohongshu":
+        return "https://www.xiaohongshu.com/"
+    return "https://www.google.com/"
+
+
+def browser_login_status(data: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    profile_dir = browser_login_profile_dir(data, platform)
+    status_file = browser_login_status_file(data, platform)
+    process = browser_login_processes.get(platform)
+    running = bool(process and process.poll() is None)
+    payload: Dict[str, Any] = {}
+    if status_file.exists():
+        try:
+            raw = json.loads(status_file.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload = raw
+        except json.JSONDecodeError:
+            payload = {}
+    return {
+        "enabled": platform in {"douyin", "xiaohongshu"},
+        "running": running,
+        "profile_dir": str(profile_dir),
+        "profile_exists": False,
+        "status": str(payload.get("status") or ("running" if running else "")),
+        "message": str(payload.get("message") or ""),
+        "updated_at": payload.get("updated_at"),
+    }
 
 
 def env_status(env_path: Path, key: str) -> Dict[str, Any]:
@@ -190,10 +264,18 @@ def infer_platform_from_url(url: str) -> str:
     text = str(url or "").lower()
     if "mp.weixin.qq.com" in text or "weixin.qq.com" in text:
         return "wechat"
+    if "xiaohongshu.com" in text or "xhslink.com" in text:
+        return "xiaohongshu"
     if "xiaoyuzhoufm.com" in text or "feed.xyzfm.space" in text or "podcast.xyz" in text:
         return "xiaoyuzhou"
     if "weibo.com" in text or "weibo.cn" in text:
         return "weibo"
+    if "kuaishou.com" in text or "gifshow.com" in text:
+        return "kuaishou"
+    if "tieba.baidu.com" in text:
+        return "tieba"
+    if "zhihu.com" in text:
+        return "zhihu"
     if "youtube.com" in text or "youtu.be" in text:
         return "youtube"
     if "bilibili.com" in text or "b23.tv" in text:
@@ -216,9 +298,13 @@ def default_tags_for_platform(platform: str) -> list[str]:
         "weibo": ["weibo", "文字"],
         "xiaoyuzhou": ["xiaoyuzhou", "播客"],
         "wechat": ["wechat", "公众号"],
+        "xiaohongshu": ["xiaohongshu", "图文"],
         "youtube": ["youtube", "视频"],
         "bilibili": ["bilibili", "视频"],
         "tiktok": ["tiktok", "视频"],
+        "kuaishou": ["kuaishou", "视频"],
+        "tieba": ["tieba", "帖子"],
+        "zhihu": ["zhihu", "问答"],
     }
     return defaults.get(platform, ["内容源"])
 
@@ -229,9 +315,13 @@ def platform_label(platform: str) -> str:
         "weibo": "微博",
         "xiaoyuzhou": "小宇宙",
         "wechat": "公众号",
+        "xiaohongshu": "小红书",
         "youtube": "YouTube",
         "bilibili": "B站",
         "tiktok": "TikTok",
+        "kuaishou": "快手",
+        "tieba": "贴吧",
+        "zhihu": "知乎",
     }
     return labels.get(platform, platform)
 
@@ -245,9 +335,13 @@ def default_output_subdirs(data: Optional[Dict[str, Any]] = None) -> Dict[str, s
         "weibo": "Weibo/内容源",
         "xiaoyuzhou": "Podcast/小宇宙",
         "wechat": "WeChat/公众号",
+        "xiaohongshu": "Xiaohongshu/内容源",
         "youtube": "YouTube/视频博主",
         "bilibili": "Bilibili/视频博主",
         "tiktok": "TikTok/视频博主",
+        "kuaishou": "Kuaishou/视频博主",
+        "tieba": "Tieba/贴吧",
+        "zhihu": "Zhihu/内容源",
     }
 
 
@@ -265,6 +359,22 @@ def output_subdirs_config(data: Dict[str, Any]) -> Dict[str, str]:
 def output_subdir_for_platform(data: Dict[str, Any], platform: str) -> str:
     platform = normalize_platform(platform)
     return output_subdirs_config(data).get(platform) or default_output_subdirs(data).get(platform) or platform
+
+
+def retention_config(data: Dict[str, Any]) -> Dict[str, bool]:
+    defaults = {
+        "keep_video": False,
+        "keep_audio": False,
+        "save_transcript_txt": False,
+        "save_source_raw": False,
+        "include_transcript_in_markdown": True,
+    }
+    raw = data.get("retention")
+    if isinstance(raw, dict):
+        for key in defaults:
+            if key in raw:
+                defaults[key] = bool(raw.get(key))
+    return defaults
 
 
 def clean_creator_name(value: str) -> str:
@@ -531,6 +641,317 @@ def fetch_wechat_creator_profile(url: str) -> Dict[str, Any]:
         "url": final_url or url,
         "platform_id": biz or hashlib.sha1((final_url or url).encode("utf-8")).hexdigest()[:16],
         "wechat_biz": biz,
+    }
+
+
+def wechat_mp_secret_paths(data: Dict[str, Any]) -> tuple[Path, Path]:
+    cookie_file = project_path(str(data.get("wechat_mp_cookie_file", "local_tools/wechat_mp_cookie.txt")))
+    token_file = project_path(str(data.get("wechat_mp_token_file", "local_tools/wechat_mp_token.txt")))
+    return cookie_file, token_file
+
+
+def read_wechat_mp_auth(data: Dict[str, Any]) -> tuple[str, str]:
+    cookie_file, token_file = wechat_mp_secret_paths(data)
+    cookie = cookie_file.read_text(encoding="utf-8").strip() if cookie_file.exists() else ""
+    token = token_file.read_text(encoding="utf-8").strip() if token_file.exists() else ""
+    return cookie, token
+
+
+def request_wechat_mp_json(endpoint: str, params: Dict[str, Any], cookie: str, timeout: int = 25) -> Dict[str, Any]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://mp.weixin.qq.com/",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    url = endpoint + "?" + urlencode({key: str(value) for key, value in params.items() if value is not None})
+    request = Request(url, headers=headers)
+    with urlopen(request, timeout=timeout) as response:
+        text = response.read(5_000_000).decode("utf-8", errors="replace")
+    data = json.loads(text)
+    return data if isinstance(data, dict) else {}
+
+
+def wechat_mp_base_resp(data: Dict[str, Any]) -> Dict[str, Any]:
+    resp = data.get("base_resp") if isinstance(data.get("base_resp"), dict) else {}
+    return resp if isinstance(resp, dict) else {}
+
+
+def ensure_wechat_mp_ok(data: Dict[str, Any], action: str) -> None:
+    resp = wechat_mp_base_resp(data)
+    ret = resp.get("ret")
+    if ret in (0, "0", None):
+        return
+    message = str(resp.get("err_msg") or resp.get("errmsg") or data.get("errmsg") or "")
+    if str(ret) in {"200003", "-1"}:
+        raise ValueError(f"公众号后台登录态失效，无法{action}。请打开 mp.weixin.qq.com 后台并用插件重新导入公众号后台 Cookie。")
+    raise ValueError(f"公众号后台接口返回错误，无法{action}：{ret} {message}".strip())
+
+
+def search_wechat_mp_accounts(keyword: str, data: Dict[str, Any], *, size: int = 5) -> list[Dict[str, Any]]:
+    cookie, token = read_wechat_mp_auth(data)
+    if not cookie or not token:
+        raise ValueError("公众号后台 Cookie/token 缺失。请先登录 mp.weixin.qq.com 后台，再用 Chrome 插件导入公众号后台 Cookie。")
+    payload = request_wechat_mp_json(
+        "https://mp.weixin.qq.com/cgi-bin/searchbiz",
+        {
+            "action": "search_biz",
+            "begin": 0,
+            "count": size,
+            "query": keyword,
+            "token": token,
+            "lang": "zh_CN",
+            "f": "json",
+            "ajax": "1",
+        },
+        cookie,
+    )
+    ensure_wechat_mp_ok(payload, "搜索公众号")
+    accounts = payload.get("list")
+    return [item for item in accounts if isinstance(item, dict)] if isinstance(accounts, list) else []
+
+
+def fetch_wechat_mp_recent_titles(fakeid: str, data: Dict[str, Any]) -> list[str]:
+    cookie, token = read_wechat_mp_auth(data)
+    if not cookie or not token or not fakeid:
+        return []
+    payload = request_wechat_mp_json(
+        "https://mp.weixin.qq.com/cgi-bin/appmsgpublish",
+        {
+            "sub": "list",
+            "search_field": "null",
+            "begin": 0,
+            "count": 5,
+            "query": "",
+            "fakeid": fakeid,
+            "type": "101_1",
+            "free_publish_type": 1,
+            "sub_action": "list_ex",
+            "token": token,
+            "lang": "zh_CN",
+            "f": "json",
+            "ajax": 1,
+        },
+        cookie,
+    )
+    ensure_wechat_mp_ok(payload, "读取公众号最近文章")
+    try:
+        publish_page = json.loads(str(payload.get("publish_page") or "{}"))
+    except json.JSONDecodeError:
+        return []
+    titles: list[str] = []
+    for item in publish_page.get("publish_list") or []:
+        if not isinstance(item, dict) or not item.get("publish_info"):
+            continue
+        try:
+            info = json.loads(str(item.get("publish_info") or "{}"))
+        except json.JSONDecodeError:
+            continue
+        for article in info.get("appmsgex") or []:
+            if isinstance(article, dict) and article.get("title"):
+                titles.append(clean_creator_name(str(article.get("title")))[:120])
+    return titles[:8]
+
+
+def fetch_wechat_mp_creator_profile(keyword: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    accounts = search_wechat_mp_accounts(keyword, data, size=5)
+    if not accounts:
+        raise ValueError(f"没有在公众号后台搜索到：{keyword}")
+    normalized_keyword = re.sub(r"\s+", "", keyword).lower()
+    selected = accounts[0]
+    for account in accounts:
+        nickname = re.sub(r"\s+", "", str(account.get("nickname") or "")).lower()
+        alias = re.sub(r"\s+", "", str(account.get("alias") or "")).lower()
+        if normalized_keyword and normalized_keyword in {nickname, alias}:
+            selected = account
+            break
+
+    fakeid = str(selected.get("fakeid") or "").strip()
+    name = clean_creator_name(str(selected.get("nickname") or keyword))
+    bio = strip_html_text(str(selected.get("signature") or ""))[:500]
+    recent_titles = fetch_wechat_mp_recent_titles(fakeid, data) if fakeid else []
+    return {
+        "name": name,
+        "bio": bio,
+        "recent_titles": recent_titles,
+        "url": f"https://mp.weixin.qq.com/cgi-bin/appmsgpublish?fakeid={quote(fakeid)}",
+        "platform_id": fakeid,
+        "wechat_fakeid": fakeid,
+        "wechat_biz": fakeid,
+        "round_head_img": str(selected.get("round_head_img") or ""),
+        "alias": str(selected.get("alias") or ""),
+    }
+
+
+def xiaohongshu_cookie_path(data: Dict[str, Any]) -> Path:
+    return project_path(str(data.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
+
+
+def xiaohongshu_headers(data: Dict[str, Any], referer: str = "https://www.xiaohongshu.com/") -> Dict[str, str]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer,
+    }
+    path = xiaohongshu_cookie_path(data)
+    if path.exists():
+        cookie = path.read_text(encoding="utf-8").strip()
+        if cookie:
+            headers["Cookie"] = cookie
+    return headers
+
+
+def decode_xiaohongshu_json_string(value: str) -> str:
+    try:
+        return json.loads(f'"{value}"')
+    except Exception:
+        return html.unescape(value).replace("\\u002F", "/").replace("\\/", "/")
+
+
+def extract_xiaohongshu_user_id(url: str) -> str:
+    parsed = urlparse(url)
+    match = re.search(r"/user/profile/([^/?#]+)", parsed.path)
+    if match:
+        return match.group(1)
+    query = parse_qs(parsed.query)
+    for key in ("user_id", "userid", "target_user_id"):
+        value = (query.get(key) or [""])[0].strip()
+        if value:
+            return value
+    return ""
+
+
+def clean_xiaohongshu_title(value: str) -> str:
+    text = clean_creator_name(value)
+    text = re.sub(r"[\s_-]*(?:小红书|RED)[\s_-]*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"的小红书(?:主页|账号)?$", "", text).strip()
+    text = re.sub(r"^@+", "", text).strip()
+    return text
+
+
+def extract_xiaohongshu_field(block: str, field: str) -> str:
+    match = re.search(rf'"{re.escape(field)}"\s*:\s*"((?:\\.|[^"\\])*)"', block)
+    return decode_xiaohongshu_json_string(match.group(1)).strip() if match else ""
+
+
+def extract_xiaohongshu_target_block(html_text: str, target_user_id: str) -> str:
+    if not target_user_id:
+        return ""
+    best = ""
+    best_score = -1
+    for match in re.finditer(re.escape(target_user_id), html_text or ""):
+        start = max(0, match.start() - 3500)
+        end = min(len(html_text), match.end() + 3500)
+        block = html_text[start:end]
+        score = 0
+        if re.search(r'"(?:userId|user_id|id)"\s*:\s*"' + re.escape(target_user_id) + r'"', block):
+            score += 4
+        if '"nickname"' in block:
+            score += 3
+        if '"desc"' in block or '"description"' in block or '"signature"' in block:
+            score += 1
+        if score > best_score:
+            best = block
+            best_score = score
+    return best if best_score > 0 else ""
+
+
+def extract_xiaohongshu_target_field(html_text: str, target_user_id: str, field: str) -> str:
+    if not target_user_id:
+        return ""
+    pattern = rf'"{re.escape(field)}"\s*:\s*"((?:\\.|[^"\\])*)"'
+    for match in re.finditer(re.escape(target_user_id), html_text or ""):
+        after = html_text[match.end(): min(len(html_text), match.end() + 2500)]
+        after_match = re.search(pattern, after, flags=re.S)
+        if after_match:
+            return decode_xiaohongshu_json_string(after_match.group(1)).strip()
+        before = html_text[max(0, match.start() - 1800): match.start()]
+        before_matches = list(re.finditer(pattern, before, flags=re.S))
+        if before_matches:
+            return decode_xiaohongshu_json_string(before_matches[-1].group(1)).strip()
+    return ""
+
+
+def extract_xiaohongshu_profile_from_html(url: str, html_text: str) -> Dict[str, Any]:
+    target_user_id = extract_xiaohongshu_user_id(url)
+    block = extract_xiaohongshu_target_block(html_text, target_user_id)
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", re.I | re.S)
+    title_name = clean_xiaohongshu_title(
+        extract_meta(html_text, "og:title")
+        or extract_meta(html_text, "twitter:title")
+        or (re.sub(r"<[^>]+>", "", title_match.group(1)) if title_match else "")
+    )
+
+    name = clean_xiaohongshu_title(extract_xiaohongshu_target_field(html_text, target_user_id, "nickname"))
+    if not name and block:
+        name = clean_xiaohongshu_title(extract_xiaohongshu_field(block, "nickname"))
+    if not name:
+        page_match = re.search(
+            r'"userPageData"\s*:\s*\{.{0,4000}?"nickname"\s*:\s*"((?:\\.|[^"\\])*)"',
+            html_text or "",
+            flags=re.S,
+        )
+        if page_match:
+            name = clean_xiaohongshu_title(decode_xiaohongshu_json_string(page_match.group(1)))
+    if not name:
+        name = title_name
+
+    bio_candidates = []
+    for field in ("desc", "description", "signature"):
+        value = extract_xiaohongshu_target_field(html_text, target_user_id, field)
+        if value:
+            bio_candidates.append(value)
+    if block:
+        for field in ("desc", "description", "signature"):
+            value = extract_xiaohongshu_field(block, field)
+            if value:
+                bio_candidates.append(value)
+    bio_candidates.extend([
+        extract_meta(html_text, "description"),
+        extract_meta(html_text, "og:description"),
+        extract_meta(html_text, "twitter:description"),
+    ])
+    bio = ""
+    for candidate in bio_candidates:
+        cleaned = strip_html_text(candidate)
+        if cleaned and cleaned != name:
+            bio = cleaned[:500]
+            break
+
+    note_titles = [
+        clean_creator_name(decode_xiaohongshu_json_string(item))
+        for item in re.findall(r'"displayTitle"\s*:\s*"((?:\\.|[^"\\])*)"', html_text or "")
+    ]
+    return {
+        "name": name,
+        "bio": bio,
+        "recent_titles": list(dict.fromkeys([item for item in note_titles if item]))[:8],
+        "platform_id": target_user_id,
+    }
+
+
+def fetch_xiaohongshu_creator_profile(url: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    request = Request(url, headers=xiaohongshu_headers(data, url))
+    with urlopen(request, timeout=30) as response:
+        final_url = response.geturl()
+        html_text = response.read(5_000_000).decode("utf-8", errors="replace")
+    profile = extract_xiaohongshu_profile_from_html(final_url or url, html_text)
+    return {
+        "name": profile.get("name") or "小红书来源",
+        "bio": profile.get("bio") or "",
+        "url": final_url or url,
+        "platform_id": profile.get("platform_id") or extract_xiaohongshu_user_id(final_url or url),
+        "recent_titles": profile.get("recent_titles") or [],
     }
 
 
@@ -913,6 +1334,13 @@ def fallback_creator_classification(name: str, bio: str, titles: list[str], plat
             "content_type": "公众号文章",
             "tags": ["wechat", "公众号", category],
         }
+    if platform == "xiaohongshu":
+        return {
+            "category": category,
+            "language": language,
+            "content_type": "图文/视频",
+            "tags": ["xiaohongshu", "图文", category],
+        }
     return {
         "category": category,
         "language": language,
@@ -921,71 +1349,73 @@ def fallback_creator_classification(name: str, bio: str, titles: list[str], plat
     }
 
 
-def classify_creator_with_ai(name: str, bio: str, titles: list[str], data: Dict[str, Any], platform: str = "douyin") -> Dict[str, Any]:
-    fallback = fallback_creator_classification(name, bio, titles, platform)
-    summary_cfg = data.get("summary") or {}
-    env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
-    api_key_env = str(summary_cfg.get("api_key_env", "DEEPSEEK_API_KEY"))
-    api_key = read_env_value(env_file, api_key_env)
-    if not api_key:
-        return fallback
-
-    base_url = str(summary_cfg.get("base_url", "https://api.deepseek.com")).rstrip("/")
-    model = str(summary_cfg.get("model", "deepseek-v4-flash"))
-    platform_name = platform_label(platform)
-    if platform == "weibo":
-        content_options = "文字/短文/长文/图文/混合"
-    elif platform == "xiaoyuzhou":
-        content_options = "访谈/单口/圆桌/新闻解读/课程/故事/混合"
-    elif platform == "wechat":
-        content_options = "深度文章/资讯/评论/教程/案例/访谈/混合"
-    else:
-        content_options = "口播/访谈/教程/剧情/带货/混合"
-    prompt = (
-        f"你是内容分类助手。请根据{platform_name}内容源昵称、简介和最近内容判断账号类型，只返回 JSON，"
-        "字段为 category, language, content_type, tags。"
-        "category 用 2-6 个中文；language 为 中文/英文/中英混合；"
-        f"content_type 为 {content_options}；tags 为 3-8 个中文标签。\n\n"
-        f"平台：{platform_name}\n昵称：{name}\n简介：{bio or '未获取到'}\n最近内容：\n" + "\n".join(f"- {title}" for title in titles[:8])
-    )
-    try:
-        import httpx
-
-        with httpx.Client(timeout=httpx.Timeout(45.0)) as client:
-            response = client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False,
-                    "temperature": 0.1,
-                    "max_tokens": 500,
-                },
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        match = re.search(r"\{.*\}", str(content), re.DOTALL)
-        parsed = json.loads(match.group(0) if match else str(content))
-        tags = parsed.get("tags") if isinstance(parsed.get("tags"), list) else fallback["tags"]
-        return {
-            "category": str(parsed.get("category") or fallback["category"])[:24],
-            "language": str(parsed.get("language") or fallback["language"])[:12],
-            "content_type": str(parsed.get("content_type") or fallback["content_type"])[:12],
-            "tags": [str(tag)[:24] for tag in tags if str(tag).strip()][:8] or fallback["tags"],
-        }
-    except Exception:
-        return fallback
+def classify_creator_locally(name: str, bio: str, titles: list[str], platform: str = "douyin") -> Dict[str, Any]:
+    return fallback_creator_classification(name, bio, titles, platform)
 
 
 def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
     raw_url = str(payload.get("url", "")).strip()
     if not raw_url:
         raise ValueError("url is required")
+    platform = normalize_platform(payload.get("platform"), raw_url)
+    data = load_config()
+    if platform == "wechat" and not raw_url.startswith(("http://", "https://")):
+        profile = fetch_wechat_mp_creator_profile(raw_url, data)
+        name = clean_creator_name(str(profile.get("name", "")))
+        bio = strip_html_text(str(profile.get("bio", "")))[:500]
+        if not name:
+            raise ValueError("没有获取到公众号名称。请确认公众号名称正确，并先用 Chrome 插件导入公众号后台 Cookie。")
+        key = pinyin_initials(name)
+        if not key:
+            raise ValueError(f"无法根据公众号名称生成 Key: {name}")
+        final_url = str(profile.get("url") or raw_url)
+        key = unique_creator_key(key, final_url, data)
+        recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
+        classification = classify_creator_locally(name, bio, recent_titles, "wechat")
+        fakeid = str(profile.get("wechat_fakeid") or profile.get("platform_id") or "").strip()
+        return {
+            "key": key,
+            "platform": "wechat",
+            "platform_id": fakeid,
+            "wechat_fakeid": fakeid,
+            "wechat_biz": str(profile.get("wechat_biz") or fakeid).strip(),
+            "name": name,
+            "url": final_url,
+            "enabled": True,
+            "category": classification.get("category", "综合"),
+            "language": classification.get("language", "中文"),
+            "content_type": classification.get("content_type", "公众号文章"),
+            "bio": bio,
+            "tags": classification.get("tags", ["wechat", "公众号"]),
+        }
+
     url = raw_url if raw_url.startswith(("http://", "https://")) else f"https://{raw_url}"
     parsed = urlparse(url)
-    platform = normalize_platform(payload.get("platform"), url)
-    data = load_config()
+    if platform == "xiaohongshu":
+        if "xiaohongshu.com" not in parsed.netloc and "xhslink.com" not in parsed.netloc:
+            raise ValueError("请输入 xiaohongshu.com 或 xhslink.com 的主页/笔记 URL")
+        profile = fetch_xiaohongshu_creator_profile(url, data)
+        name = clean_creator_name(str(profile.get("name", "")))
+        if not name:
+            raise ValueError("没有获取到小红书昵称。请确认页面可访问，并先用 Chrome 插件导入小红书 Cookie。")
+        final_url = str(profile.get("url") or url)
+        key = unique_creator_key(pinyin_initials(name), final_url, data)
+        bio = strip_html_text(str(profile.get("bio", "")))[:500]
+        recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
+        classification = classify_creator_locally(name, bio, recent_titles, "xiaohongshu")
+        return {
+            "key": key,
+            "platform": "xiaohongshu",
+            "platform_id": str(profile.get("platform_id") or ""),
+            "name": name,
+            "url": final_url,
+            "enabled": True,
+            "category": classification.get("category", "生活方式"),
+            "language": classification.get("language", "中文"),
+            "content_type": "图文/视频",
+            "bio": bio,
+            "tags": classification.get("tags", ["xiaohongshu", "图文"]),
+        }
     if platform == "xiaoyuzhou":
         if "xiaoyuzhoufm.com" not in parsed.netloc and "feed.xyzfm.space" not in parsed.netloc and "podcast.xyz" not in parsed.netloc:
             raise ValueError("请输入 xiaoyuzhoufm.com 的节目或单集 URL")
@@ -1000,7 +1430,7 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         final_url = str(profile.get("url") or url)
         key = unique_creator_key(key, final_url, data)
         recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
-        classification = classify_creator_with_ai(name, bio, recent_titles, data, "xiaoyuzhou")
+        classification = classify_creator_locally(name, bio, recent_titles, "xiaoyuzhou")
         platform_id = str(profile.get("platform_id") or "").strip()
         creator = {
             "key": key,
@@ -1040,12 +1470,13 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         final_url = str(profile.get("url") or url)
         key = unique_creator_key(key, final_url, data)
         recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
-        classification = classify_creator_with_ai(name, bio, recent_titles, data, "wechat")
+        classification = classify_creator_locally(name, bio, recent_titles, "wechat")
         platform_id = str(profile.get("platform_id") or "").strip()
         creator = {
             "key": key,
             "platform": "wechat",
             "platform_id": platform_id,
+            "wechat_fakeid": platform_id,
             "wechat_biz": str(profile.get("wechat_biz") or "").strip(),
             "name": name,
             "url": final_url,
@@ -1086,7 +1517,7 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         final_url = str(profile.get("url") or url)
         key = unique_creator_key(key, final_url, data)
         recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
-        classification = classify_creator_with_ai(name, bio, recent_titles, data, "weibo")
+        classification = classify_creator_locally(name, bio, recent_titles, "weibo")
         uid = str(profile.get("uid") or "").strip()
         custom = str(profile.get("custom") or "").strip()
         platform_id = uid or custom
@@ -1154,7 +1585,7 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError(f"无法根据博主名称生成 Key: {name}")
     key = unique_creator_key(key, final_url, data)
     recent_titles = profile.get("recent_titles") if isinstance(profile.get("recent_titles"), list) else []
-    classification = classify_creator_with_ai(name, bio, [str(item) for item in recent_titles], data, "douyin")
+    classification = classify_creator_locally(name, bio, [str(item) for item in recent_titles], "douyin")
 
     return {
         "key": key,
@@ -1192,6 +1623,7 @@ def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
         "summary": {
             "model": (data.get("summary") or {}).get("model", ""),
         },
+        "retention": retention_config(data),
         "creators": public_creators,
     }
 
@@ -1200,6 +1632,8 @@ def status_payload() -> Dict[str, Any]:
     data = load_config()
     cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
     weibo_cookie_file = project_path(str(data.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))
+    xiaohongshu_cookie_file = project_path(str(data.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
+    wechat_mp_cookie_file, wechat_mp_token_file = wechat_mp_secret_paths(data)
     env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
     api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
     vault_path = Path(str(data.get("vault_path", ""))).expanduser()
@@ -1208,6 +1642,11 @@ def status_payload() -> Dict[str, Any]:
     output_dir = vault_path / output_subdirs["douyin"]
     douyin_cookie = cookie_status(cookie_file)
     weibo_cookie = file_ready(weibo_cookie_file, ["paste_your", "PASTE_YOUR"])
+    xiaohongshu_cookie = xiaohongshu_cookie_status(xiaohongshu_cookie_file)
+    wechat_mp_cookie = file_ready(wechat_mp_cookie_file, ["paste_your", "PASTE_YOUR"])
+    wechat_mp_token = file_ready(wechat_mp_token_file, ["paste_your", "PASTE_YOUR"])
+    wechat_mp_cookie["token_ready"] = bool(wechat_mp_token.get("ready"))
+    wechat_mp_cookie["ready"] = bool(wechat_mp_cookie.get("ready") and wechat_mp_token.get("ready"))
     return {
         "time": utc_now(),
         "config_path": str(get_config_path()),
@@ -1217,11 +1656,23 @@ def status_payload() -> Dict[str, Any]:
                 "label": platform_label("douyin"),
                 "runnable": "douyin" in RUNNABLE_PLATFORMS,
                 "cookie": douyin_cookie,
+                "browser_login": browser_login_status(data, "douyin"),
             },
             "weibo": {
                 "label": platform_label("weibo"),
                 "runnable": "weibo" in RUNNABLE_PLATFORMS,
                 "cookie": weibo_cookie,
+            },
+            "wechat": {
+                "label": platform_label("wechat"),
+                "runnable": "wechat" in RUNNABLE_PLATFORMS,
+                "cookie": wechat_mp_cookie,
+            },
+            "xiaohongshu": {
+                "label": platform_label("xiaohongshu"),
+                "runnable": "xiaohongshu" in RUNNABLE_PLATFORMS,
+                "cookie": xiaohongshu_cookie,
+                "browser_login": browser_login_status(data, "xiaohongshu"),
             },
         },
         "deepseek": env_status(env_file, api_key_env),
@@ -1520,6 +1971,52 @@ def humanize_item_error(value: Optional[str]) -> str:
     return humanize_log_line(str(value))
 
 
+def invalid_xiaohongshu_candidate_sql() -> str:
+    return """
+    NOT (
+        source_url LIKE '%xiaohongshu.com/404%'
+        OR title = '小红书 - 你访问的页面不见了'
+        OR title LIKE '%你访问的页面不见了%'
+    )
+    """
+
+
+def latest_candidate_cache(conn: sqlite3.Connection, run: Dict[str, Any]) -> Dict[str, Any]:
+    creator_filter = str(run.get("creator_filter") or "").strip()
+    current_creator = str(run.get("current_creator") or "").strip()
+    params: list[Any] = []
+    filters = ["ri.status = 'dry_run'", invalid_xiaohongshu_candidate_sql()]
+    if creator_filter:
+        filters.append("(r.creator_filter = ? OR ri.creator_key = ?)")
+        params.extend([creator_filter, creator_filter])
+    elif current_creator:
+        filters.append("(r.current_creator = ? OR ri.creator_name = ?)")
+        params.extend([current_creator, current_creator])
+    where_sql = " AND ".join(filters)
+    row = conn.execute(
+        f"""
+        SELECT r.run_id, r.started_at, r.creator_filter, r.current_creator,
+               COUNT(*) AS candidate_count
+        FROM runs r
+        JOIN run_items ri ON ri.run_id = r.run_id
+        WHERE {where_sql}
+        GROUP BY r.run_id
+        ORDER BY r.started_at DESC
+        LIMIT 1
+        """,
+        params,
+    ).fetchone()
+    if not row:
+        return {}
+    return {
+        "run_id": str(row["run_id"]),
+        "started_at": str(row["started_at"] or ""),
+        "creator_filter": str(row["creator_filter"] or ""),
+        "current_creator": str(row["current_creator"] or ""),
+        "candidate_count": int(row["candidate_count"] or 0),
+    }
+
+
 def read_dashboard_runs(data: Dict[str, Any], limit: int = 12) -> list[Dict[str, Any]]:
     state_path = configured_state_path(data)
     if not state_path.exists():
@@ -1539,32 +2036,230 @@ def read_dashboard_runs(data: Dict[str, Any], limit: int = 12) -> list[Dict[str,
             runs: list[Dict[str, Any]] = []
             for row in rows:
                 run = dict(row)
-                item_rows = conn.execute(
+                status_rows = conn.execute(
                     """
-                    SELECT video_id, creator_key, creator_name, title, source_url, status, stage,
-                           error, markdown_path, updated_at
+                    SELECT status, COUNT(*) AS count
                     FROM run_items
                     WHERE run_id = ?
-                    ORDER BY updated_at ASC, video_id ASC
+                    GROUP BY status
                     """,
                     (run["run_id"],),
                 ).fetchall()
-                items = [dict(item) for item in item_rows]
-                for item in items:
-                    item["error_human"] = humanize_item_error(item.get("error"))
-                run["items"] = items
+                status_counts = {str(item["status"]): int(item["count"] or 0) for item in status_rows}
+                current_video_id = str(run.get("current_video_id") or "")
+                current_item = None
+                if current_video_id:
+                    row = conn.execute(
+                        """
+                        SELECT video_id, creator_key, creator_name, title, source_url, status, stage,
+                               error, markdown_path, updated_at
+                        FROM run_items
+                        WHERE run_id = ? AND video_id = ?
+                        """,
+                        (run["run_id"], current_video_id),
+                    ).fetchone()
+                    current_item = dict(row) if row else None
+                if current_item is None:
+                    row = conn.execute(
+                        """
+                        SELECT video_id, creator_key, creator_name, title, source_url, status, stage,
+                               error, markdown_path, updated_at
+                        FROM run_items
+                        WHERE run_id = ? AND status = 'running'
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (run["run_id"],),
+                    ).fetchone()
+                    current_item = dict(row) if row else None
+                run["current_video_title"] = str((current_item or {}).get("title") or "")
+                error_rows = conn.execute(
+                    """
+                    SELECT DISTINCT error
+                    FROM run_items
+                    WHERE run_id = ? AND error IS NOT NULL AND error != ''
+                    ORDER BY updated_at DESC
+                    LIMIT 3
+                    """,
+                    (run["run_id"],),
+                ).fetchall()
                 run["failure_reasons"] = list(
-                    dict.fromkeys(item["error_human"] for item in items if item.get("error_human"))
-                )[:3]
+                    dict.fromkeys(humanize_item_error(item["error"]) for item in error_rows if item["error"])
+                )
                 run["detected_count"] = int(run.get("detected_count") or 0)
                 run["planned_count"] = int(run.get("planned_count") or 0)
                 run["success_count"] = int(run.get("success_count") or 0)
                 run["failed_count"] = int(run.get("failed_count") or 0)
                 run["skipped_count"] = int(run.get("skipped_count") or 0)
+                run["dry_count"] = status_counts.get("dry_run", 0)
+                run["running_count"] = status_counts.get("running", 0)
+                run["pending_count"] = status_counts.get("pending", 0)
+                run["item_count"] = sum(status_counts.values())
+                run["candidate_cache"] = latest_candidate_cache(conn, run)
+                run["items"] = []
                 runs.append(run)
             return runs
     except sqlite3.Error:
         return []
+
+
+def run_items_page(
+    data: Dict[str, Any],
+    run_id: str,
+    *,
+    page: int = 1,
+    page_size: int = 50,
+    status_filter: str = "dry_run",
+    query: str = "",
+) -> Dict[str, Any]:
+    if not run_id:
+        raise ValueError("缺少运行编号")
+    state_path = configured_state_path(data)
+    if not state_path.exists():
+        raise ValueError("暂无运行数据库")
+    page = max(1, page)
+    page_size = max(10, min(100, page_size))
+    status_filter = status_filter.strip() or "dry_run"
+    query = query.strip()
+    where = ["run_id = ?", invalid_xiaohongshu_candidate_sql()]
+    params: list[Any] = [run_id]
+    if status_filter == "attention":
+        where.append("status IN ('failed', 'pending', 'running')")
+    elif status_filter == "done":
+        where.append("status IN ('success', 'skipped')")
+    elif status_filter != "all":
+        where.append("status = ?")
+        params.append(status_filter)
+    if query:
+        where.append("(title LIKE ? OR video_id LIKE ? OR creator_name LIKE ?)")
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    where_sql = " AND ".join(where)
+    try:
+        with sqlite3.connect(str(state_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM run_items WHERE {where_sql}",
+                    params,
+                ).fetchone()[0]
+                or 0
+            )
+            offset = (page - 1) * page_size
+            rows = conn.execute(
+                f"""
+                SELECT video_id, creator_key, creator_name, title, source_url, status, stage,
+                       error, markdown_path, updated_at
+                FROM run_items
+                WHERE {where_sql}
+                ORDER BY updated_at ASC, video_id ASC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, page_size, offset],
+            ).fetchall()
+            items = [dict(row) for row in rows]
+            for item in items:
+                item["error_human"] = humanize_item_error(item.get("error"))
+            return {
+                "run_id": run_id,
+                "status": status_filter,
+                "query": query,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "items": items,
+            }
+    except sqlite3.Error as exc:
+        raise ValueError(f"读取运行明细失败：{exc}") from exc
+
+
+def run_item_ids(
+    data: Dict[str, Any],
+    run_id: str,
+    *,
+    status_filter: str = "dry_run",
+    query: str = "",
+) -> Dict[str, Any]:
+    state_path = configured_state_path(data)
+    if not run_id:
+        raise ValueError("缺少运行编号")
+    if not state_path.exists():
+        raise ValueError("暂无运行数据库")
+    status_filter = status_filter.strip() or "dry_run"
+    query = query.strip()
+    where = ["run_id = ?", invalid_xiaohongshu_candidate_sql()]
+    params: list[Any] = [run_id]
+    if status_filter == "attention":
+        where.append("status IN ('failed', 'pending', 'running')")
+    elif status_filter == "done":
+        where.append("status IN ('success', 'skipped')")
+    elif status_filter != "all":
+        where.append("status = ?")
+        params.append(status_filter)
+    if query:
+        where.append("(title LIKE ? OR video_id LIKE ? OR creator_name LIKE ?)")
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    try:
+        with sqlite3.connect(str(state_path)) as conn:
+            rows = conn.execute(
+                f"SELECT video_id FROM run_items WHERE {' AND '.join(where)} ORDER BY updated_at ASC, video_id ASC",
+                params,
+            ).fetchall()
+        ids = [str(row[0]) for row in rows if row[0]]
+        return {"run_id": run_id, "status": status_filter, "query": query, "total": len(ids), "video_ids": ids}
+    except sqlite3.Error as exc:
+        raise ValueError(f"读取候选 ID 失败：{exc}") from exc
+
+
+def latest_candidate_cache_for_creator(data: Dict[str, Any], creator_key: str, creator_name: str) -> Dict[str, Any]:
+    state_path = configured_state_path(data)
+    if not state_path.exists():
+        return {}
+    creator_key = str(creator_key or "").strip()
+    creator_name = str(creator_name or "").strip()
+    conditions: list[str] = []
+    params: list[Any] = []
+    if creator_key:
+        conditions.extend(["ri.creator_key = ?", "r.creator_filter = ?"])
+        params.extend([creator_key, creator_key])
+    if creator_name:
+        conditions.extend(["ri.creator_name = ?", "r.current_creator = ?"])
+        params.extend([creator_name, creator_name])
+    if not conditions:
+        return {}
+    where_sql = " AND ".join([
+        "ri.status = 'dry_run'",
+        invalid_xiaohongshu_candidate_sql(),
+        f"({' OR '.join(conditions)})",
+    ])
+    try:
+        with sqlite3.connect(str(state_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                f"""
+                SELECT r.run_id, r.started_at, r.creator_filter, r.current_creator,
+                       COUNT(*) AS candidate_count
+                FROM runs r
+                JOIN run_items ri ON ri.run_id = r.run_id
+                WHERE {where_sql}
+                GROUP BY r.run_id
+                ORDER BY r.started_at DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        if not row:
+            return {}
+        return {
+            "run_id": str(row["run_id"]),
+            "started_at": str(row["started_at"] or ""),
+            "creator_filter": str(row["creator_filter"] or ""),
+            "current_creator": str(row["current_creator"] or ""),
+            "candidate_count": int(row["candidate_count"] or 0),
+        }
+    except sqlite3.Error as exc:
+        raise ValueError(f"读取已保存候选失败：{exc}") from exc
 
 
 def latest_run_progress(runs: list[Dict[str, Any]], running: bool) -> Dict[str, Any]:
@@ -1572,20 +2267,34 @@ def latest_run_progress(runs: list[Dict[str, Any]], running: bool) -> Dict[str, 
         return {"label": "暂无进度", "percent": 0, "running": running}
     run = runs[0]
     total = int(run.get("planned_count") or 0)
-    done = int(run.get("success_count") or 0) + int(run.get("failed_count") or 0)
+    done = (
+        int(run.get("success_count") or 0)
+        + int(run.get("failed_count") or 0)
+        + int(run.get("skipped_count") or 0)
+        + int(run.get("dry_count") or 0)
+    )
     percent = 100 if total == 0 and run.get("status") in {"done", "done_with_errors"} else 0
     if total:
         percent = min(100, int((done / total) * 100))
-    label = f"{run.get('current_stage') or '最近任务'}"
+    stage = str(run.get("current_stage") or "最近任务")
     current_creator = run.get("current_creator") or ""
-    if current_creator:
-        label = f"{current_creator}：{label}"
+    current_title = str(run.get("current_video_title") or "").strip()
+    if running and current_creator and current_title and stage in {"处理视频", "AI 总结", "写入 Markdown", "转录音频", "转录播客"}:
+        label = f"正在处理 {current_creator}：{current_title}"
+    elif running and current_creator:
+        label = f"正在运行 {current_creator}：{stage}"
+    elif running:
+        label = f"正在运行：{stage}"
+    elif current_creator:
+        label = f"最近任务 {current_creator}：{stage}"
+    else:
+        label = f"最近任务：{stage}"
     return {
         "label": label,
         "percent": percent,
         "running": running,
         "current_creator": current_creator,
-        "current_video": run.get("current_video_id") or "",
+        "current_video": current_title or run.get("current_video_id") or "",
         "completed_items": done,
         "total_items": total,
         "fetched_creators": None,
@@ -1660,10 +2369,33 @@ def normalize_creator(raw: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, An
     sec_user_id = str(raw.get("sec_user_id", "")).strip()
     if sec_user_id:
         creator["sec_user_id"] = sec_user_id
-    for field in ("platform_id", "weibo_uid", "weibo_custom", "xiaoyuzhou_pid", "xiaoyuzhou_eid", "wechat_biz", "rss_url", "feed_url"):
+    for field in ("platform_id", "weibo_uid", "weibo_custom", "xiaoyuzhou_pid", "xiaoyuzhou_eid", "wechat_biz", "wechat_fakeid", "rss_url", "feed_url"):
         value = str(raw.get(field, "")).strip()
         if value:
             creator[field] = value
+    manual_urls = raw.get("manual_urls") or []
+    if isinstance(manual_urls, str):
+        manual_urls = [item.strip() for item in manual_urls.splitlines() if item.strip()]
+    if isinstance(manual_urls, list):
+        urls = [str(item).strip() for item in manual_urls if str(item).strip()]
+        if urls:
+            creator["manual_urls"] = list(dict.fromkeys(urls))
+    manual_items = raw.get("manual_items") or []
+    if isinstance(manual_items, list):
+        items = []
+        for item in manual_items:
+            if not isinstance(item, dict):
+                continue
+            item_url = str(item.get("url") or "").strip()
+            if not item_url:
+                continue
+            items.append({
+                "url": item_url,
+                "title": clean_creator_name(str(item.get("title") or "")),
+            })
+        if items:
+            by_url = {item["url"]: item for item in items}
+            creator["manual_items"] = list(by_url.values())
     cookie_profile = str(raw.get("cookie_profile", "")).strip()
     if cookie_profile:
         creator["cookie_profile"] = cookie_profile
@@ -1687,6 +2419,12 @@ def save_public_config(payload: Dict[str, Any]) -> Dict[str, Any]:
             if str(raw_subdirs.get(platform) or defaults.get(platform) or "").strip()
         }
         data["output_subdir"] = data["output_subdirs"].get("douyin", data.get("output_subdir", ""))
+    if "retention" in payload:
+        raw_retention = payload.get("retention")
+        if not isinstance(raw_retention, dict):
+            raise ValueError("retention must be an object")
+        current = retention_config(data)
+        data["retention"] = {key: bool(raw_retention.get(key, current[key])) for key in current}
     if "creators" in payload:
         creators = payload.get("creators")
         if not isinstance(creators, list):
@@ -1696,10 +2434,125 @@ def save_public_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return public_config(data)
 
 
+def same_creator_identity(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    left_platform = normalize_platform(left.get("platform"), str(left.get("url", "")))
+    right_platform = normalize_platform(right.get("platform"), str(right.get("url", "")))
+    if left_platform != right_platform:
+        return False
+    left_platform_id = str(left.get("platform_id") or "").strip()
+    right_platform_id = str(right.get("platform_id") or "").strip()
+    if left_platform_id and right_platform_id and left_platform_id == right_platform_id:
+        return True
+    left_url = str(left.get("url") or "").strip()
+    right_url = str(right.get("url") or "").strip()
+    if left_url and right_url and left_url == right_url:
+        return True
+    left_key = str(left.get("key") or "").strip()
+    right_key = str(right.get("key") or "").strip()
+    return bool(left_key and right_key and left_key == right_key)
+
+
+def import_creator_from_plugin(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = load_config()
+    raw = payload.get("creator") if isinstance(payload.get("creator"), dict) else payload
+    if not isinstance(raw, dict):
+        raise ValueError("creator must be an object")
+    platform = normalize_platform(raw.get("platform"), str(raw.get("url", "")))
+    if platform != "xiaohongshu":
+        raise ValueError("当前只支持从插件导入小红书博主")
+
+    name = clean_creator_name(str(raw.get("name") or ""))
+    url = str(raw.get("url") or "").strip()
+    if not name:
+        raise ValueError("没有读到小红书博主名称，请确认当前标签页是博主主页")
+    if "xiaohongshu.com" not in url and "xhslink.com" not in url:
+        raise ValueError("当前标签页不是小红书页面")
+
+    platform_id = str(raw.get("platform_id") or extract_xiaohongshu_user_id(url)).strip()
+    bio = strip_html_text(str(raw.get("bio") or ""))[:500]
+    recent_titles = [clean_creator_name(str(item)) for item in (raw.get("recent_titles") or []) if str(item).strip()]
+    manual_urls = raw.get("manual_urls") or []
+    if isinstance(manual_urls, str):
+        manual_urls = [item.strip() for item in manual_urls.splitlines() if item.strip()]
+    manual_items = raw.get("manual_items") or []
+    if not manual_urls and isinstance(manual_items, list):
+        manual_urls = [str(item.get("url") or "").strip() for item in manual_items if isinstance(item, dict)]
+    classification = classify_creator_locally(name, bio, recent_titles, "xiaohongshu")
+    creator = normalize_creator(
+        {
+            "key": str(raw.get("key") or "").strip(),
+            "platform": "xiaohongshu",
+            "platform_id": platform_id,
+            "name": name,
+            "url": url,
+            "enabled": True,
+            "category": classification.get("category", "综合"),
+            "language": classification.get("language", "中文"),
+            "content_type": "图文/视频",
+            "bio": bio,
+            "manual_urls": manual_urls,
+            "manual_items": manual_items,
+            "tags": classification.get("tags", ["xiaohongshu", "图文"]),
+        },
+        data,
+    )
+
+    creators = data.get("creators")
+    if not isinstance(creators, list):
+        creators = []
+    updated = False
+    next_creators = []
+    for existing in creators:
+        if isinstance(existing, dict) and same_creator_identity(existing, creator):
+            merged = dict(existing)
+            merged.update(creator)
+            old_urls = existing.get("manual_urls") or []
+            new_urls = creator.get("manual_urls") or []
+            if isinstance(old_urls, str):
+                old_urls = [item.strip() for item in old_urls.splitlines() if item.strip()]
+            if isinstance(new_urls, str):
+                new_urls = [item.strip() for item in new_urls.splitlines() if item.strip()]
+            if isinstance(old_urls, list) or isinstance(new_urls, list):
+                merged["manual_urls"] = list(dict.fromkeys([
+                    str(item).strip()
+                    for item in [*(old_urls if isinstance(old_urls, list) else []), *(new_urls if isinstance(new_urls, list) else [])]
+                    if str(item).strip()
+                ]))
+            old_items = existing.get("manual_items") or []
+            new_items = creator.get("manual_items") or []
+            merged_items = []
+            if isinstance(old_items, list):
+                merged_items.extend([item for item in old_items if isinstance(item, dict)])
+            if isinstance(new_items, list):
+                merged_items.extend([item for item in new_items if isinstance(item, dict)])
+            if merged_items:
+                by_url = {}
+                for item in merged_items:
+                    item_url = str(item.get("url") or "").strip()
+                    if not item_url:
+                        continue
+                    current = by_url.get(item_url) or {"url": item_url, "title": ""}
+                    title = clean_creator_name(str(item.get("title") or "")) or current.get("title", "")
+                    by_url[item_url] = {"url": item_url, "title": title}
+                merged["manual_items"] = list(by_url.values())
+            next_creators.append(normalize_creator(merged, data))
+            updated = True
+        else:
+            next_creators.append(existing)
+    if not updated:
+        next_creators.append(creator)
+    data["creators"] = next_creators
+    save_config(data)
+    return {"creator": creator, "updated": updated, "config": public_config(data)}
+
+
 def save_secrets(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = load_config()
     cookie = str(payload.get("douyin_cookie", "")).strip()
     weibo_cookie = str(payload.get("weibo_cookie", "")).strip()
+    wechat_mp_cookie = str(payload.get("wechat_mp_cookie", "")).strip()
+    wechat_mp_token = str(payload.get("wechat_mp_token", "")).strip()
+    xiaohongshu_cookie = str(payload.get("xiaohongshu_cookie", "")).strip()
     api_key = str(payload.get("deepseek_api_key", "")).strip()
     if cookie:
         cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
@@ -1709,11 +2562,73 @@ def save_secrets(payload: Dict[str, Any]) -> Dict[str, Any]:
         cookie_file = project_path(str(data.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))
         cookie_file.parent.mkdir(parents=True, exist_ok=True)
         cookie_file.write_text(weibo_cookie + "\n", encoding="utf-8")
+    if wechat_mp_cookie:
+        cookie_file, _ = wechat_mp_secret_paths(data)
+        cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        cookie_file.write_text(wechat_mp_cookie + "\n", encoding="utf-8")
+    if wechat_mp_token:
+        _, token_file = wechat_mp_secret_paths(data)
+        token_file.parent.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(wechat_mp_token + "\n", encoding="utf-8")
+    if xiaohongshu_cookie:
+        cookie_file = project_path(str(data.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
+        cookie_file.parent.mkdir(parents=True, exist_ok=True)
+        cookie_file.write_text(xiaohongshu_cookie + "\n", encoding="utf-8")
     if api_key:
         env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
         api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
         update_env_value(env_file, api_key_env, api_key)
     return status_payload()
+
+
+def browser_login_cookie_file(data: Dict[str, Any], platform: str) -> Path:
+    if platform == "douyin":
+        return project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
+    if platform == "xiaohongshu":
+        return project_path(str(data.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
+    raise ValueError(f"{platform_label(platform)} 暂不支持扫码登录")
+
+
+def start_browser_login(payload: Dict[str, Any]) -> Dict[str, Any]:
+    platform = normalize_platform(payload.get("platform"))
+    if platform not in {"douyin", "xiaohongshu"}:
+        raise ValueError("当前只支持抖音和小红书扫码登录")
+
+    process = browser_login_processes.get(platform)
+    if process and process.poll() is None:
+        return {"started": False, "login": browser_login_status(load_config(), platform)}
+
+    data = load_config()
+    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    log_dir = work_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"browser_login_{platform}.log"
+    status_file = browser_login_status_file(data, platform)
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    entry_url = browser_login_entry_url(platform)
+    status_file.write_text(
+        json.dumps(
+            {
+                "platform": platform,
+                "label": platform_label(platform),
+                "status": "opened_system_chrome",
+                "message": f"已在你的当前 Chrome 打开{platform_label(platform)}。登录完成后，请用本项目 Chrome 插件导入 Cookie。",
+                "updated_at": time.time(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"\n[{utc_now()}] OPEN_SYSTEM_CHROME {platform} {entry_url}\n")
+        log.flush()
+    try:
+        subprocess.Popen(["open", "-a", "Google Chrome", entry_url])
+    except Exception:
+        subprocess.Popen(["open", entry_url])
+    return {"started": True, "login": browser_login_status(data, platform), "log_path": str(log_path)}
 
 
 def failed_run_items(data: Dict[str, Any], run_id: str = "") -> tuple[str, list[Dict[str, Any]]]:
@@ -1802,6 +2717,8 @@ def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         cmd.append("--dry-run")
     if payload.get("skip_summary"):
         cmd.append("--skip-summary")
+    else:
+        cmd.append("--with-deepseek")
     if payload.get("force"):
         cmd.append("--force")
     if payload.get("full_history"):
@@ -1854,6 +2771,8 @@ def start_selected_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         cmd.extend(["--creator", creator_keys[0]])
     if payload.get("skip_summary"):
         cmd.append("--skip-summary")
+    else:
+        cmd.append("--with-deepseek")
     if payload.get("force"):
         cmd.append("--force")
 
@@ -1910,6 +2829,8 @@ def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         cmd.extend(["--creator", creator_keys[0]])
     if payload.get("skip_summary"):
         cmd.append("--skip-summary")
+    else:
+        cmd.append("--with-deepseek")
     if payload.get("force", True):
         cmd.append("--force")
 
@@ -1958,9 +2879,6 @@ def open_local_target(payload: Dict[str, Any]) -> Dict[str, Any]:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_text("", encoding="utf-8")
-    elif target == "creative":
-        path = output_root_path(data) / "创作工坊"
-        path.mkdir(parents=True, exist_ok=True)
     elif target == "vault":
         path = Path(str(data.get("vault_path", ""))).expanduser()
         path.mkdir(parents=True, exist_ok=True)
@@ -1969,290 +2887,6 @@ def open_local_target(payload: Dict[str, Any]) -> Dict[str, Any]:
         path.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(["open", str(path)])
     return {"target": target, "path": str(path)}
-
-
-def safe_local_filename(text: str, limit: int = 64) -> str:
-    text = re.sub(r"[\\/:*?\"<>|\r\n\t]+", "_", text or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    return (text or "未命名二创")[:limit].rstrip(". ")
-
-
-def strip_frontmatter(text: str) -> str:
-    if not text.startswith("---"):
-        return text
-    parts = text.split("---", 2)
-    if len(parts) == 3:
-        return parts[2].lstrip()
-    return text
-
-
-def markdown_title(text: str, path: Path) -> str:
-    for line in strip_frontmatter(text).splitlines():
-        line = line.strip()
-        if line.startswith("# "):
-            return line[2:].strip() or path.stem
-    return path.stem
-
-
-def creative_search_terms(topic: str) -> list[str]:
-    topic = re.sub(r"\s+", " ", topic or "").strip()
-    if not topic:
-        return []
-    terms = [topic.lower()]
-    for item in re.split(r"[\s,，;；、/|]+", topic):
-        item = item.strip().lower()
-        if item and item not in terms:
-            terms.append(item)
-    return terms
-
-
-def iter_creative_markdown_paths(data: Dict[str, Any], platform: str) -> list[tuple[str, Path]]:
-    vault_path = output_root_path(data)
-    if not vault_path.exists():
-        raise FileNotFoundError(f"Obsidian Vault 不存在：{vault_path}")
-    output_subdirs = output_subdirs_config(data)
-    platforms = CREATIVE_SOURCE_PLATFORMS if platform == "all" else [normalize_platform(platform)]
-    items: list[tuple[str, Path]] = []
-    seen: set[Path] = set()
-    for platform_key in platforms:
-        if platform_key not in CREATIVE_SOURCE_PLATFORMS:
-            continue
-        base = vault_path / output_subdirs.get(platform_key, platform_key)
-        if not base.exists():
-            continue
-        for path in base.rglob("*.md"):
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            if "创作工坊" in path.parts:
-                continue
-            seen.add(resolved)
-            items.append((platform_key, path))
-    items.sort(key=lambda item: item[1].stat().st_mtime, reverse=True)
-    return items
-
-
-def collect_creative_sources(data: Dict[str, Any], platform: str, topic: str, limit: int) -> list[Dict[str, Any]]:
-    creative_cfg = data.get("creative") if isinstance(data.get("creative"), dict) else {}
-    max_scan = int(creative_cfg.get("max_scan", 300))
-    excerpt_chars = int(creative_cfg.get("excerpt_chars", 4500))
-    terms = creative_search_terms(topic)
-    candidates = iter_creative_markdown_paths(data, platform)[:max_scan]
-    scored: list[tuple[int, float, Dict[str, Any]]] = []
-    fallback: list[tuple[int, float, Dict[str, Any]]] = []
-    vault_path = output_root_path(data)
-
-    for platform_key, path in candidates:
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            raw_text = path.read_text(encoding="utf-8", errors="replace")
-        body = strip_frontmatter(raw_text).strip()
-        title = markdown_title(raw_text, path)
-        rel_path = str(path.relative_to(vault_path)) if path.is_relative_to(vault_path) else str(path)
-        source = {
-            "platform": platform_key,
-            "platform_label": platform_label(platform_key),
-            "title": title,
-            "path": str(path),
-            "relative_path": rel_path,
-            "excerpt": body[:excerpt_chars],
-        }
-        haystack = f"{title}\n{rel_path}\n{body[:12000]}".lower()
-        score = 0
-        for term in terms:
-            if term in haystack:
-                score += 4 if term == topic.strip().lower() else 1
-        entry = (score, path.stat().st_mtime, source)
-        fallback.append(entry)
-        if not terms or score > 0:
-            scored.append(entry)
-
-    chosen = scored or fallback
-    chosen.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    return [item[2] for item in chosen[:limit]]
-
-
-def creative_system_prompt(format_key: str) -> str:
-    shared = (
-        "你是一个中文内容二创编辑。你只能基于用户提供的本地知识库素材创作，不能编造素材里没有的事实、数据、人物经历或引用。\n"
-        "写法要求：观点清晰，结构可直接执行，保留可追溯来源；如果素材不足，要明确标注需要补充的信息。\n"
-        "输出必须是 Markdown。"
-    )
-    format_prompts = {
-        "xiaohongshu": (
-            "生成小红书图文草稿：给出 5 个标题备选、封面文字、8-12 页图文分页脚本、正文 caption、话题标签和配图建议。"
-        ),
-        "douyin_dialogue": (
-            "生成抖音双人对谈/播客视频脚本：包含选题定位、30 秒开场钩子、双人分工、分段台词、转场提示、结尾行动点和标题备选。"
-        ),
-        "twitter": (
-            "生成 Twitter/X 内容：包含一条 8-12 条的 thread、5 条单条短帖、3 个开头钩子，并保留信息密度。"
-        ),
-        "wechat_article": (
-            "生成公众号文章草稿：包含标题备选、摘要、文章大纲、完整正文、金句摘录和可继续扩展的素材缺口。"
-        ),
-        "all": (
-            "围绕同一主题生成四类输出：小红书图文、抖音双人对谈脚本、Twitter/X thread、公众号文章。每类都要独立成章，避免互相复述。"
-        ),
-    }
-    return f"{shared}\n\n{format_prompts.get(format_key, format_prompts['all'])}"
-
-
-def creative_user_prompt(topic: str, format_key: str, sources: list[Dict[str, Any]]) -> str:
-    source_blocks = []
-    for index, source in enumerate(sources, start=1):
-        source_blocks.append(
-            f"### 素材 {index}: {source['title']}\n"
-            f"- 平台：{source['platform_label']}\n"
-            f"- 文件：{source['relative_path']}\n\n"
-            f"{source['excerpt']}"
-        )
-    topic_text = topic.strip() or "基于最近入库内容，提炼一个适合二创的主题"
-    return (
-        f"创作主题/方向：{topic_text}\n"
-        f"输出类型：{CREATIVE_FORMAT_LABELS.get(format_key, format_key)}\n"
-        f"素材数量：{len(sources)}\n\n"
-        "请先列出你实际使用到的素材编号，再生成草稿。\n\n"
-        "下面是本地知识库素材：\n\n"
-        + "\n\n---\n\n".join(source_blocks)
-    )
-
-
-def call_creative_model(data: Dict[str, Any], format_key: str, topic: str, sources: list[Dict[str, Any]]) -> tuple[str, str]:
-    env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
-    summary_cfg = data.get("summary") if isinstance(data.get("summary"), dict) else {}
-    creative_cfg = data.get("creative") if isinstance(data.get("creative"), dict) else {}
-    api_key_env = str(creative_cfg.get("api_key_env") or summary_cfg.get("api_key_env") or "DEEPSEEK_API_KEY")
-    api_key = read_env_value(env_file, api_key_env) or os.environ.get(api_key_env, "")
-    if not api_key:
-        raise RuntimeError(f"缺少 {api_key_env}。请先在设置里保存 DeepSeek API Key。")
-
-    base_url = str(creative_cfg.get("base_url") or summary_cfg.get("base_url") or "https://api.deepseek.com").rstrip("/")
-    model = str(creative_cfg.get("model") or summary_cfg.get("model") or "deepseek-v4-flash")
-    if model == "deepseek-v4":
-        model = "deepseek-v4-pro"
-    thinking = str(creative_cfg.get("thinking") or summary_cfg.get("thinking") or "disabled")
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": creative_system_prompt(format_key)},
-            {"role": "user", "content": creative_user_prompt(topic, format_key, sources)},
-        ],
-        "stream": False,
-        "max_tokens": int(creative_cfg.get("max_tokens") or 7000),
-        "thinking": {"type": thinking},
-    }
-    if thinking == "disabled":
-        payload["temperature"] = float(creative_cfg.get("temperature") or 0.45)
-
-    import httpx
-
-    endpoint = f"{base_url}/chat/completions"
-    with httpx.Client(timeout=httpx.Timeout(240.0)) as client:
-        response = client.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
-    if response.status_code >= 400:
-        detail = response.text.strip().replace(api_key, "[REDACTED]")
-        try:
-            error_data = response.json()
-            error = error_data.get("error") if isinstance(error_data, dict) else None
-            if isinstance(error, dict) and error.get("message"):
-                detail = str(error["message"])
-        except ValueError:
-            pass
-        raise RuntimeError(f"DeepSeek API {response.status_code}: {detail[:800]}")
-
-    result = response.json()
-    try:
-        content = result["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"DeepSeek 返回格式异常：{result}") from exc
-    return str(content).strip(), model
-
-
-def save_creative_draft(
-    data: Dict[str, Any],
-    format_key: str,
-    topic: str,
-    content: str,
-    model: str,
-    sources: list[Dict[str, Any]],
-) -> Path:
-    vault_path = output_root_path(data)
-    label = CREATIVE_FORMAT_LABELS.get(format_key, format_key)
-    out_dir = vault_path / "创作工坊" / label
-    out_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M")
-    title = safe_local_filename(topic or label, 52)
-    path = out_dir / f"{timestamp}-{title}.md"
-    source_lines = "\n".join(
-        f"- {source['platform_label']} · {source['title']} · `{source['relative_path']}`"
-        for source in sources
-    )
-    frontmatter = {
-        "source": "creative_workbench",
-        "format": format_key,
-        "topic": topic.strip() or "",
-        "model": model,
-        "generated_at": utc_now(),
-        "source_count": len(sources),
-    }
-    frontmatter_text = "\n".join(
-        f"{key}: {json.dumps(value, ensure_ascii=False)}"
-        for key, value in frontmatter.items()
-    )
-    markdown = (
-        f"---\n{frontmatter_text}\n---\n\n"
-        f"# {topic.strip() or label}\n\n"
-        "## 素材来源\n\n"
-        f"{source_lines or '- 无'}\n\n"
-        "## 二创草稿\n\n"
-        f"{content.strip()}\n"
-    )
-    path.write_text(markdown, encoding="utf-8")
-    return path
-
-
-def generate_creative_draft(payload: Dict[str, Any]) -> Dict[str, Any]:
-    data = load_config()
-    topic = str(payload.get("topic", "")).strip()
-    platform = str(payload.get("platform", "all")).strip() or "all"
-    if platform != "all":
-        platform = normalize_platform(platform)
-    format_key = str(payload.get("format", "all")).strip() or "all"
-    if format_key not in CREATIVE_FORMAT_LABELS:
-        raise ValueError(f"暂不支持的二创类型：{format_key}")
-    limit = int(payload.get("limit") or 8)
-    limit = max(1, min(limit, 20))
-    sources = collect_creative_sources(data, platform, topic, limit)
-    if not sources:
-        raise ValueError("没有找到可用于二创的 Markdown 素材。请先抓取内容，或调整平台筛选。")
-    content, model = call_creative_model(data, format_key, topic, sources)
-    path = save_creative_draft(data, format_key, topic, content, model, sources)
-    return {
-        "path": str(path),
-        "format": format_key,
-        "format_label": CREATIVE_FORMAT_LABELS.get(format_key, format_key),
-        "model": model,
-        "source_count": len(sources),
-        "sources": [
-            {
-                "platform": source["platform"],
-                "platform_label": source["platform_label"],
-                "title": source["title"],
-                "relative_path": source["relative_path"],
-            }
-            for source in sources
-        ],
-        "preview": content[:2200],
-    }
 
 
 def read_body(handler: BaseHTTPRequestHandler) -> Dict[str, Any]:
@@ -2293,7 +2927,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_bytes(status, data, "application/json; charset=utf-8")
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         try:
             if path in {"/", "/index.html"}:
                 self.send_bytes(HTTPStatus.OK, read_static("index.html"), "text/html; charset=utf-8")
@@ -2307,6 +2942,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "status": status_payload()})
             elif path == "/api/run/status":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": worker_status()})
+            elif path == "/api/run/items":
+                query = parse_qs(parsed_url.query)
+                page_data = run_items_page(
+                    load_config(),
+                    str(query.get("run_id", [""])[0]).strip(),
+                    page=int(query.get("page", ["1"])[0] or 1),
+                    page_size=int(query.get("page_size", ["50"])[0] or 50),
+                    status_filter=str(query.get("status", ["dry_run"])[0]),
+                    query=str(query.get("query", [""])[0]),
+                )
+                self.send_json(HTTPStatus.OK, {"ok": True, "items": page_data})
+            elif path == "/api/run/item-ids":
+                query = parse_qs(parsed_url.query)
+                ids_data = run_item_ids(
+                    load_config(),
+                    str(query.get("run_id", [""])[0]).strip(),
+                    status_filter=str(query.get("status", ["dry_run"])[0]),
+                    query=str(query.get("query", [""])[0]),
+                )
+                self.send_json(HTTPStatus.OK, {"ok": True, "items": ids_data})
+            elif path == "/api/run/candidate-cache":
+                query = parse_qs(parsed_url.query)
+                cache_data = latest_candidate_cache_for_creator(
+                    load_config(),
+                    str(query.get("creator", [""])[0]).strip(),
+                    str(query.get("name", [""])[0]).strip(),
+                )
+                self.send_json(HTTPStatus.OK, {"ok": True, "cache": cache_data})
             else:
                 self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not_found"})
         except Exception as exc:  # noqa: BLE001
@@ -2320,8 +2983,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "config": save_public_config(payload)})
             elif path == "/api/secrets":
                 self.send_json(HTTPStatus.OK, {"ok": True, "status": save_secrets(payload)})
+            elif path == "/api/browser-login/start":
+                self.send_json(HTTPStatus.OK, {"ok": True, **start_browser_login(payload)})
             elif path == "/api/creator/resolve":
                 self.send_json(HTTPStatus.OK, {"ok": True, "creator": resolve_creator_from_url(payload)})
+            elif path == "/api/creator/import":
+                self.send_json(HTTPStatus.OK, {"ok": True, **import_creator_from_plugin(payload)})
             elif path == "/api/run":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_sync(payload)})
             elif path == "/api/run/selected":
@@ -2330,8 +2997,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": retry_failed_items(payload)})
             elif path == "/api/run/stop":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": stop_sync()})
-            elif path == "/api/creative/generate":
-                self.send_json(HTTPStatus.OK, {"ok": True, "draft": generate_creative_draft(payload)})
             elif path == "/api/open":
                 self.send_json(HTTPStatus.OK, {"ok": True, "opened": open_local_target(payload)})
             else:

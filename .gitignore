@@ -9,12 +9,16 @@ local_tools/douyin_cookie.txt
 local_tools/douyin_cookie_*.txt
 local_tools/weibo_cookie.txt
 local_tools/weibo_cookie_*.txt
+local_tools/wechat_mp_cookie.txt
+local_tools/wechat_mp_token.txt
+local_tools/xiaohongshu_cookie.txt
 local_tools/urls.txt
 local_tools/extension_queue.txt
 local_tools/obsidian_sync/.env
 local_tools/obsidian_sync/state.sqlite
 local_tools/obsidian_sync/state.sqlite-*
 local_tools/obsidian_sync/work/
+local_tools/external/
 download/
 .DS_Store
 

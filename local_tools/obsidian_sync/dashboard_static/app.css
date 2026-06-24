@@ -156,6 +156,13 @@ main {
   border-color: #e0b5b5;
 }
 
+#workerBadge {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .panel {
   min-width: 0;
   border: 1px solid var(--line);
@@ -309,6 +316,11 @@ button:hover {
   color: #1f7a3a;
 }
 
+.platform-pill.xiaohongshu {
+  border-color: #e7b4b9;
+  color: #b22334;
+}
+
 .platform-pill.youtube,
 .platform-pill.tiktok,
 .platform-pill.bilibili {
@@ -341,16 +353,88 @@ button:hover {
 
 .run-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 120px;
+  grid-template-columns: minmax(320px, 1fr) 120px 150px;
   gap: 10px;
   align-items: end;
 }
 
-.creative-grid {
+.run-source-picker {
+  min-width: 0;
+}
+
+.run-source-selected {
+  min-height: 28px;
+  margin: -4px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-source-selected.ok {
+  color: var(--ok);
+}
+
+.run-source-list {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 150px 180px 120px;
-  gap: 10px;
-  align-items: end;
+  gap: 6px;
+  max-height: 270px;
+  overflow: auto;
+  border: 1px solid #ecece7;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fbfbf8;
+}
+
+.run-source-item {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  border-color: #e0e0da;
+  padding: 8px;
+  color: var(--text);
+  background: #fff;
+  text-align: left;
+}
+
+.run-source-item.active {
+  border-color: #86b69b;
+  background: #f1f8f3;
+}
+
+.run-source-item.disabled {
+  color: var(--muted);
+  background: #f4f4f0;
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.run-source-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.run-source-main strong,
+.run-source-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-source-main strong {
+  font-size: 13px;
+}
+
+.run-source-main small,
+.run-source-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-source-empty {
+  padding: 10px;
+  text-align: center;
 }
 
 .panel-actions {
@@ -375,9 +459,30 @@ button:hover {
   grid-column: 1 / -1;
 }
 
+.retention-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 10px;
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  margin-top: 6px;
+  padding: 10px;
+  background: #fbfbf8;
+}
+
+.retention-box h4 {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.retention-box .check {
+  margin-bottom: 8px;
+}
+
 .account-list > div {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-columns: 64px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   border: 1px solid #ecece7;
@@ -447,41 +552,6 @@ button:hover {
 
 .progress-meta {
   margin-top: 8px;
-}
-
-.creative-result {
-  min-width: 0;
-  margin-top: 12px;
-  border: 1px solid #ecece7;
-  border-radius: 8px;
-  padding: 12px;
-  background: #fbfbf8;
-}
-
-.creative-result.empty {
-  color: var(--muted);
-}
-
-.creative-result .result-meta {
-  display: grid;
-  gap: 4px;
-  margin-bottom: 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.creative-result pre {
-  overflow: auto;
-  max-height: 420px;
-  margin: 0;
-  border: 1px solid #ecece7;
-  border-radius: 6px;
-  padding: 10px;
-  color: var(--text);
-  background: #fff;
-  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .history-item,
@@ -619,6 +689,35 @@ button:hover {
   display: flex;
   gap: 8px;
   margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.item-tools.paged {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto auto;
+  align-items: center;
+}
+
+.item-tools.paged input {
+  margin: 0;
+}
+
+.item-page-meta {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.item-pager {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  justify-content: flex-end;
+}
+
+.item-pager button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .run-item {
@@ -744,16 +843,17 @@ pre {
 
   .two-col,
   .run-grid,
-  .creative-grid,
   .creator-toolbar,
   .creator-summary,
   .creator-fields,
   .platform-output-grid,
-  .account-list > div,
-  .history-metrics,
-  .run-item {
-    grid-template-columns: 1fr;
-  }
+	  .retention-box,
+	  .account-list > div,
+	  .history-metrics,
+	  .item-tools.paged,
+	  .run-item {
+	    grid-template-columns: 1fr;
+	  }
 
   .archive-item {
     display: grid;

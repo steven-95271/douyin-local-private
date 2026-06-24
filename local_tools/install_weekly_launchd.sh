@@ -3,7 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-mkdir -p "$HOME/Library/LaunchAgents" local_tools/obsidian_sync/work/logs
+launchd_log_dir="$HOME/Library/Logs/douyin-local-private"
+mkdir -p "$HOME/Library/LaunchAgents" "$launchd_log_dir" local_tools/obsidian_sync/work/logs
 
 unload_label() {
   local label="$1"
@@ -70,26 +71,35 @@ PLIST
 
 # Remove the old combined job if it was installed before the split schedule.
 unload_label "local.douyin-obsidian-weekly"
+unload_label "local.douyin-obsidian-content-sync"
 
 root="$(pwd)"
-content_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC START\"; .venv/bin/python local_tools/obsidian_sync/sync.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC DONE\"; } >> local_tools/obsidian_sync/work/logs/weekly_content_sync.log 2>&1"
-brief_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF START\"; .venv/bin/python local_tools/obsidian_sync/weekly_brief.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF DONE\"; } >> local_tools/obsidian_sync/work/logs/weekly_brief.log 2>&1"
+content_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p '${launchd_log_dir}' local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC START\"; .venv/bin/python local_tools/obsidian_sync/sync.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC DONE\"; } >> '${launchd_log_dir}/weekly_content_sync.log' 2>&1"
+brief_command="cd '${root}' && export PATH=\"\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\" && mkdir -p '${launchd_log_dir}' local_tools/obsidian_sync/work/logs && { echo; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF START\"; .venv/bin/python local_tools/obsidian_sync/weekly_brief.py --config local_tools/obsidian_sync/creators.yaml; echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] WEEKLY BRIEF DONE\"; } >> '${launchd_log_dir}/weekly_brief.log' 2>&1"
 
 install_job \
-  "local.douyin-obsidian-content-sync" \
+  "local.douyin-obsidian-content-sync-monday" \
   "${content_command}" \
-  0 22 0 \
-  "${root}/local_tools/obsidian_sync/work/logs/weekly_content_launchd.out.log" \
-  "${root}/local_tools/obsidian_sync/work/logs/weekly_content_launchd.err.log"
+  1 6 0 \
+  "${launchd_log_dir}/weekly_content_launchd_monday.out.log" \
+  "${launchd_log_dir}/weekly_content_launchd_monday.err.log"
+
+install_job \
+  "local.douyin-obsidian-content-sync-wednesday" \
+  "${content_command}" \
+  3 6 0 \
+  "${launchd_log_dir}/weekly_content_launchd_wednesday.out.log" \
+  "${launchd_log_dir}/weekly_content_launchd_wednesday.err.log"
 
 install_job \
   "local.douyin-obsidian-weekly-brief" \
   "${brief_command}" \
   1 11 0 \
-  "${root}/local_tools/obsidian_sync/work/logs/weekly_brief_launchd.out.log" \
-  "${root}/local_tools/obsidian_sync/work/logs/weekly_brief_launchd.err.log"
+  "${launchd_log_dir}/weekly_brief_launchd.out.log" \
+  "${launchd_log_dir}/weekly_brief_launchd.err.log"
 
-echo "Content sync: every Sunday at 22:00 local time"
+echo "Content sync: every Monday and Wednesday at 06:00 local time"
 echo "Weekly brief: every Monday at 11:00 local time"
-echo "Content log: ${root}/local_tools/obsidian_sync/work/logs/weekly_content_sync.log"
-echo "Brief log: ${root}/local_tools/obsidian_sync/work/logs/weekly_brief.log"
+echo "Content log: ${launchd_log_dir}/weekly_content_sync.log"
+echo "Brief log: ${launchd_log_dir}/weekly_brief.log"
+echo "Launchd log dir: ${launchd_log_dir}"
