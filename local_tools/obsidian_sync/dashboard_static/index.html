@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Content Obsidian Sync</title>
-    <link rel="stylesheet" href="/app.css?v=20260617-login-profile">
+    <link rel="stylesheet" href="/app.css?v=20260707-health-retry">
   </head>
   <body>
     <div class="shell">
@@ -20,6 +20,7 @@
           <a href="#creators" class="active">来源</a>
           <a href="#settings">设置</a>
           <a href="#run">运行</a>
+          <a href="#health">自检</a>
           <a href="#history">记录</a>
           <a href="#logs">日志</a>
         </nav>
@@ -34,9 +35,11 @@
           <div class="status-row">
             <span id="douyinCookieBadge" class="badge">抖音登录</span>
             <span id="weiboCookieBadge" class="badge">微博 Cookie</span>
+            <span id="xBackendBadge" class="badge">X 后端</span>
             <span id="wechatCookieBadge" class="badge">公众号后台</span>
             <span id="xiaohongshuCookieBadge" class="badge">小红书登录</span>
-            <span id="keyBadge" class="badge">DeepSeek</span>
+            <span id="keyBadge" class="badge">模型 API</span>
+            <span id="healthBadge" class="badge">自检</span>
             <span id="workerBadge" class="badge">Idle</span>
           </div>
         </header>
@@ -55,6 +58,7 @@
                 <option value="all">全部平台</option>
                 <option value="douyin">抖音</option>
                 <option value="weibo">微博</option>
+                <option value="x">X</option>
                 <option value="xiaoyuzhou">小宇宙</option>
                 <option value="wechat">公众号</option>
                 <option value="xiaohongshu">小红书</option>
@@ -72,6 +76,7 @@
             <span id="creatorCount" class="badge">0 个来源</span>
           </div>
           <div id="creatorList" class="creator-list"></div>
+          <div id="creatorPager" class="creator-pager"></div>
           <div class="panel-actions">
             <button id="saveCreators" type="button">保存内容源配置</button>
           </div>
@@ -83,41 +88,47 @@
             <label>Obsidian Vault
               <input id="vaultPath" type="text">
             </label>
-            <div class="platform-output-grid">
-              <label>抖音子目录
-                <input id="outputSubdirDouyin" type="text" placeholder="Douyin/口播博主">
-              </label>
-              <label>微博子目录
-                <input id="outputSubdirWeibo" type="text" placeholder="Weibo/内容源">
-              </label>
-              <label>小宇宙子目录
-                <input id="outputSubdirXiaoyuzhou" type="text" placeholder="Podcast/小宇宙">
-              </label>
-              <label>公众号子目录
-                <input id="outputSubdirWechat" type="text" placeholder="WeChat/公众号">
-              </label>
-              <label>小红书子目录
-                <input id="outputSubdirXiaohongshu" type="text" placeholder="Xiaohongshu/内容源">
-              </label>
-              <label>YouTube 子目录
-                <input id="outputSubdirYoutube" type="text" placeholder="YouTube/视频博主">
-              </label>
-              <label>B站子目录
-                <input id="outputSubdirBilibili" type="text" placeholder="Bilibili/视频博主">
-              </label>
-              <label>TikTok 子目录
-                <input id="outputSubdirTiktok" type="text" placeholder="TikTok/视频博主">
-              </label>
-              <label>快手子目录
-                <input id="outputSubdirKuaishou" type="text" placeholder="Kuaishou/视频博主">
-              </label>
-              <label>贴吧子目录
-                <input id="outputSubdirTieba" type="text" placeholder="Tieba/贴吧">
-              </label>
-              <label>知乎子目录
-                <input id="outputSubdirZhihu" type="text" placeholder="Zhihu/内容源">
-              </label>
-            </div>
+            <details class="advanced-output">
+              <summary>高级输出路径</summary>
+              <div class="platform-output-grid">
+                <label>抖音子目录
+                  <input id="outputSubdirDouyin" type="text" placeholder="Douyin/口播博主">
+                </label>
+                <label>微博子目录
+                  <input id="outputSubdirWeibo" type="text" placeholder="Weibo/内容源">
+                </label>
+                <label>X 子目录
+                  <input id="outputSubdirX" type="text" placeholder="X/内容源">
+                </label>
+                <label>小宇宙子目录
+                  <input id="outputSubdirXiaoyuzhou" type="text" placeholder="Podcast/小宇宙">
+                </label>
+                <label>公众号子目录
+                  <input id="outputSubdirWechat" type="text" placeholder="WeChat/公众号">
+                </label>
+                <label>小红书子目录
+                  <input id="outputSubdirXiaohongshu" type="text" placeholder="Xiaohongshu/内容源">
+                </label>
+                <label>YouTube 子目录
+                  <input id="outputSubdirYoutube" type="text" placeholder="YouTube/视频博主">
+                </label>
+                <label>B站子目录
+                  <input id="outputSubdirBilibili" type="text" placeholder="Bilibili/视频博主">
+                </label>
+                <label>TikTok 子目录
+                  <input id="outputSubdirTiktok" type="text" placeholder="TikTok/视频博主">
+                </label>
+                <label>快手子目录
+                  <input id="outputSubdirKuaishou" type="text" placeholder="Kuaishou/视频博主">
+                </label>
+                <label>贴吧子目录
+                  <input id="outputSubdirTieba" type="text" placeholder="Tieba/贴吧">
+                </label>
+                <label>知乎子目录
+                  <input id="outputSubdirZhihu" type="text" placeholder="Zhihu/内容源">
+                </label>
+              </div>
+            </details>
             <div class="retention-box">
               <h4>素材保留</h4>
               <label class="check">
@@ -141,6 +152,14 @@
                 <span>Markdown 内保留原文/逐字稿</span>
               </label>
             </div>
+            <div class="retention-box">
+              <h4>抓取前过滤</h4>
+              <label class="check">
+                <input id="filterPromotions" type="checkbox" checked>
+                <span>过滤商单、推广、直播通告</span>
+              </label>
+              <p class="field-help">在下载、OCR、Whisper 和 AI 总结前，用标题/正文元数据跳过明显的商单、带货、导流、直播预告等低价值内容。</p>
+            </div>
             <button id="saveSettings" type="button">保存输出设置</button>
           </div>
           <div>
@@ -154,10 +173,16 @@
               <div>
                 <strong>微博</strong>
                 <span id="weiboAccountText">可通过 Chrome 插件导入 Cookie，用于 URL 补全和文本抓取</span>
+                <button id="verifyWeiboAuth" type="button" class="secondary small">验证</button>
+              </div>
+              <div>
+                <strong>X</strong>
+                <span id="xAccountText">通过 OpenCLI 复用本机 Chrome/X 登录态</span>
               </div>
               <div>
                 <strong>公众号</strong>
                 <span id="wechatAccountText">可通过 Chrome 插件导入公众号后台 Cookie，用于名称搜索和历史文章同步</span>
+                <button id="verifyWechatAuth" type="button" class="secondary small">验证</button>
               </div>
               <div>
                 <strong>小红书</strong>
@@ -178,8 +203,8 @@
                 <textarea id="weiboCookieInput" rows="4" placeholder="粘贴微博网页版 Cookie"></textarea>
               </label>
             </details>
-            <label>DeepSeek API Key
-              <input id="apiKeyInput" type="password" placeholder="sk-...">
+            <label>GLM API Key
+              <input id="apiKeyInput" type="password" placeholder="GLM Coding Plan API Key">
             </label>
             <button id="saveSecrets" type="button">保存密钥</button>
           </div>
@@ -211,10 +236,12 @@
           <div class="panel-actions">
             <button id="scanCandidates" type="button">全量嗅探候选内容</button>
             <button id="crawlCreatorAll" type="button">全量抓取该来源</button>
+            <button id="pauseRun" type="button" class="secondary">暂停任务</button>
+            <button id="resumeRun" type="button" class="secondary">继续任务</button>
             <button id="stopRun" type="button" class="secondary">停止任务</button>
             <button id="openOutput" type="button" class="secondary">打开输出目录</button>
           </div>
-          <p class="run-note">搜索框支持名称、平台、分类、标签；灰色项代表已入库但抓取适配器待接入。建议先全量嗅探候选内容，再在运行记录里勾选需要抓取的条目。当前可正式抓取平台：抖音、微博、小宇宙、公众号。</p>
+          <p class="run-note">搜索框支持名称、平台、分类、标签；灰色项代表已入库但抓取适配器待接入。建议先全量嗅探候选内容，再在运行记录里勾选需要抓取的条目。当前可正式抓取平台：抖音、微博、X、小宇宙、公众号、小红书。</p>
           <div id="progressBox" class="progress-box">
             <div class="progress-head">
               <strong id="progressLabel">暂无进度</strong>
@@ -224,6 +251,19 @@
               <div id="progressFill" class="progress-fill"></div>
             </div>
             <div id="progressMeta" class="progress-meta"></div>
+          </div>
+        </section>
+
+        <section id="health" class="panel">
+          <div class="panel-head">
+            <div>
+              <h3>每日自检</h3>
+              <p>每天 11:10 检查 00:00 自动任务是否跑完、哪些来源漏扫、失败项是否已自动重试。</p>
+            </div>
+            <span id="healthSummary" class="badge">暂无自检</span>
+          </div>
+          <div id="healthBox" class="health-box">
+            <p class="empty">暂无自检报告</p>
           </div>
         </section>
 
@@ -245,6 +285,6 @@
       </main>
     </div>
     <div id="toast"></div>
-    <script src="/app.js?v=20260617-login-profile"></script>
+    <script src="/app.js?v=20260707-health-retry"></script>
   </body>
 </html>

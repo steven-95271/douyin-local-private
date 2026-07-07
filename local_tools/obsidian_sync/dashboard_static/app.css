@@ -213,6 +213,88 @@ textarea {
   resize: vertical;
 }
 
+.field-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.health-box {
+  display: grid;
+  gap: 14px;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.health-card {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfbf8;
+}
+
+.health-card strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.health-card.warn {
+  border-color: #e0c697;
+}
+
+.health-card.bad {
+  border-color: #e0b5b5;
+}
+
+.health-detail {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+}
+
+.health-detail h4 {
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.health-detail ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.health-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.health-actions span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.health-warning {
+  color: var(--bad);
+}
+
 button {
   border: 1px solid var(--accent);
   border-radius: 6px;
@@ -240,6 +322,21 @@ button:hover {
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.creator-pager {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.creator-pager button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .creator-toolbar {
@@ -304,6 +401,11 @@ button:hover {
 .platform-pill.weibo {
   border-color: #e0c697;
   color: var(--warn);
+}
+
+.platform-pill.x {
+  border-color: #c5c5c5;
+  color: #111;
 }
 
 .platform-pill.xiaoyuzhou {
@@ -459,6 +561,24 @@ button:hover {
   grid-column: 1 / -1;
 }
 
+.advanced-output {
+  border: 1px solid #ecece7;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  padding: 9px 10px;
+  background: #fbfbf8;
+}
+
+.advanced-output summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.advanced-output[open] summary {
+  margin-bottom: 10px;
+}
+
 .retention-box {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -597,7 +717,9 @@ button:hover {
 }
 
 .history-item.done_with_errors strong,
-.history-item.running strong {
+.history-item.running strong,
+.history-item.pausing strong,
+.history-item.paused strong {
   color: var(--warn);
 }
 
@@ -844,16 +966,34 @@ pre {
   .two-col,
   .run-grid,
   .creator-toolbar,
-  .creator-summary,
   .creator-fields,
   .platform-output-grid,
-	  .retention-box,
-	  .account-list > div,
-	  .history-metrics,
-	  .item-tools.paged,
-	  .run-item {
-	    grid-template-columns: 1fr;
-	  }
+  .retention-box,
+  .account-list > div,
+  .history-metrics,
+  .health-grid,
+  .creator-pager,
+  .item-tools.paged,
+  .run-item {
+    grid-template-columns: 1fr;
+  }
+
+  .creator-pager {
+    justify-content: stretch;
+  }
+
+  .creator-summary {
+    grid-template-columns: 72px minmax(0, 1fr) auto auto;
+  }
+
+  .creator-summary [data-summary="meta"] {
+    grid-column: 2 / -1;
+  }
+
+  .creator-summary .platform-pill,
+  .creator-summary .badge {
+    justify-self: start;
+  }
 
   .archive-item {
     display: grid;

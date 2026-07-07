@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import hashlib
 import html
 import json
@@ -23,7 +24,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -47,6 +48,8 @@ from local_tools.batch_download import (  # noqa: E402
 )
 from local_tools.obsidian_sync.platforms.base import PlatformRunContext  # noqa: E402
 from local_tools.obsidian_sync.platforms.registry import PlatformRegistry  # noqa: E402
+from local_tools.obsidian_sync.subtitle_ocr import transcribe_subtitles_from_video  # noqa: E402
+from local_tools.obsidian_sync.tagging import assign_tags  # noqa: E402
 from local_tools.obsidian_sync.platforms.xiaohongshu.crawler import XiaohongshuCrawler  # noqa: E402
 
 
@@ -54,6 +57,7 @@ VIDEO_TYPES = {0, 4, 51, 55, 58, 61}
 KNOWN_PLATFORMS = {
     "douyin",
     "weibo",
+    "x",
     "xiaoyuzhou",
     "wechat",
     "xiaohongshu",
@@ -64,9 +68,20 @@ KNOWN_PLATFORMS = {
     "tieba",
     "zhihu",
 }
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat", "xiaohongshu"}
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"}
+TRANSCRIPT_MODES = {"auto", "audio", "subtitle_ocr", "subtitle_ocr_fallback_audio"}
 WHISPER_MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
 WHISPER_MODEL_LOCK = threading.Lock()
+SYNC_LOCK_HANDLE: Optional[Any] = None
+PROMOTION_FILTER_RULES: List[Tuple[str, int, str]] = [
+    (r"(商单|恰饭|广子|接广|广告合作|品牌合作|商务合作|商业合作|推广合作|付费推广|本视频.{0,8}(广告|推广)|含推广)", 8, "商单/推广"),
+    (r"(直播预告|直播通告|今晚.{0,12}直播|明天.{0,12}直播|今天.{0,12}直播|[0-2]?\d[:：点].{0,12}直播|预约直播|开播提醒)", 7, "直播通告"),
+    (r"(来我直播间|进直播间|直播间见|直播间.{0,8}(等你|开播|下单|领取|福利))", 7, "直播导流"),
+    (r"(小黄车|商品橱窗|购物车|同款链接|链接在.{0,10}(评论|主页|橱窗)|评论区.{0,12}(链接|领取|下单|购买|报名|进群)|私信.{0,12}(领取|资料|报名|进群|咨询|链接))", 7, "导流/带货"),
+    (r"(领券|领取优惠券|优惠券.{0,12}(领取|链接|下单)|团购|秒杀|限时优惠|福利价|到手价|拼团|补货通知|新品上架|新品上市)", 6, "促销"),
+    (r"(课程报名|训练营报名|社群招募|限时招生|一对一咨询|付费咨询|咨询入口|预约咨询|报名入口)", 6, "课程/咨询转化"),
+    (r"(转发抽|评论抽|抽奖|粉丝福利|福利来了)", 5, "福利抽奖"),
+]
 
 
 @dataclass
@@ -80,6 +95,22 @@ class CreatorVideo:
     raw: Dict[str, Any]
     tags: List[str]
     platform: str = "douyin"
+
+
+def source_error_video(creator: Dict[str, Any], platform: str, run_id: str, message: str) -> CreatorVideo:
+    key = str(creator.get("key") or creator.get("name") or "source").strip() or "source"
+    title = f"来源失败：{str(creator.get('name') or key)}"
+    return CreatorVideo(
+        creator_key=key,
+        creator_name=str(creator.get("name") or key),
+        video_id=f"source_error_{run_id}_{key}",
+        source_url=str(creator.get("url") or ""),
+        title=title,
+        create_time=None,
+        raw={"error": message},
+        tags=[platform, "来源失败"],
+        platform=platform,
+    )
 
 
 def utc_now() -> str:
@@ -113,6 +144,99 @@ def load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
+def normalize_transcript_mode(value: Any) -> str:
+    mode = str(value or "auto").strip()
+    return mode if mode in TRANSCRIPT_MODES else "auto"
+
+
+def creator_runtime_options(creator: Dict[str, Any]) -> Dict[str, Any]:
+    options: Dict[str, Any] = {}
+    transcript_mode = normalize_transcript_mode(creator.get("transcript_mode"))
+    if transcript_mode != "auto":
+        options["transcript_mode"] = transcript_mode
+    return options
+
+
+def content_filter_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "enabled": True,
+        "filter_promotions": True,
+        "min_score": 6,
+    }
+    raw = config.get("content_filter")
+    if isinstance(raw, dict):
+        for key in defaults:
+            if key in raw:
+                defaults[key] = raw.get(key)
+    defaults["enabled"] = bool(defaults.get("enabled"))
+    defaults["filter_promotions"] = bool(defaults.get("filter_promotions"))
+    try:
+        defaults["min_score"] = int(defaults.get("min_score") or 6)
+    except (TypeError, ValueError):
+        defaults["min_score"] = 6
+    return defaults
+
+
+def creator_promotion_filter_enabled(creator: Dict[str, Any], config: Dict[str, Any], args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "no_content_filter", False)):
+        return False
+    cfg = content_filter_config(config)
+    if not cfg["enabled"] or not cfg["filter_promotions"]:
+        return False
+    if creator.get("filter_promotions") is False:
+        return False
+    return True
+
+
+def filter_text_parts(video: CreatorVideo) -> Tuple[str, str]:
+    raw = video.raw if isinstance(video.raw, dict) else {}
+    title = str(video.title or "")
+    keys = (
+        "original_text",
+        "description_text",
+        "desc",
+        "caption",
+        "text",
+        "content",
+        "full_text",
+        "digest",
+        "summary",
+        "title",
+    )
+    parts: List[str] = []
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    body = "\n".join(dict.fromkeys(parts))
+    return title, body[:5000]
+
+
+def promotion_filter_reason(video: CreatorVideo, config: Dict[str, Any]) -> str:
+    cfg = content_filter_config(config)
+    min_score = int(cfg["min_score"])
+    title, body = filter_text_parts(video)
+    matched_labels: List[str] = []
+    score = 0
+    for pattern, weight, label in PROMOTION_FILTER_RULES:
+        title_hit = re.search(pattern, title, flags=re.IGNORECASE)
+        body_hit = re.search(pattern, body, flags=re.IGNORECASE)
+        if title_hit:
+            score += weight * 2
+        elif body_hit:
+            score += weight
+        if title_hit or body_hit:
+            matched_labels.append(label)
+    if score < min_score:
+        return ""
+    labels = "、".join(dict.fromkeys(matched_labels))
+    return f"命中推广过滤：{labels}。已跳过下载、转录和 AI 总结。"
+
+
+def transcript_mode_for_video(video: "CreatorVideo") -> str:
+    return normalize_transcript_mode(video.raw.get("transcript_mode"))
+
+
 def infer_platform_from_url(url: str) -> str:
     text = str(url or "").lower()
     if "mp.weixin.qq.com" in text or "weixin.qq.com" in text:
@@ -123,6 +247,8 @@ def infer_platform_from_url(url: str) -> str:
         return "xiaoyuzhou"
     if "weibo.com" in text or "weibo.cn" in text:
         return "weibo"
+    if "x.com" in text or "twitter.com" in text:
+        return "x"
     if "kuaishou.com" in text or "gifshow.com" in text:
         return "kuaishou"
     if "tieba.baidu.com" in text:
@@ -151,6 +277,7 @@ def default_output_subdirs(config: Optional[Dict[str, Any]] = None) -> Dict[str,
     return {
         "douyin": legacy_douyin or "Douyin/口播博主",
         "weibo": "Weibo/内容源",
+        "x": "X/内容源",
         "xiaoyuzhou": "Podcast/小宇宙",
         "wechat": "WeChat/公众号",
         "xiaohongshu": "Xiaohongshu/内容源",
@@ -356,6 +483,18 @@ def ensure_state(conn: sqlite3.Connection) -> None:
 
 def default_run_id() -> str:
     return "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def pause_requested(args: argparse.Namespace) -> bool:
+    pause_file = str(getattr(args, "pause_file", "") or "").strip()
+    return bool(pause_file and Path(pause_file).expanduser().exists())
+
+
+def recent_cutoff_timestamp(args: argparse.Namespace) -> int:
+    days = int(getattr(args, "recent_days", 0) or 0)
+    if days <= 0:
+        return 0
+    return int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
 
 
 def update_run_counts(conn: sqlite3.Connection, run_id: str) -> None:
@@ -666,6 +805,9 @@ def aweme_to_video(creator: Dict[str, Any], item: Dict[str, Any]) -> Optional[Cr
     if not isinstance(tags, list):
         tags = ["douyin", "口播"]
 
+    raw = dict(item)
+    raw.update(creator_runtime_options(creator))
+
     return CreatorVideo(
         creator_key=str(creator["key"]),
         creator_name=str(creator.get("name") or creator["key"]),
@@ -673,7 +815,7 @@ def aweme_to_video(creator: Dict[str, Any], item: Dict[str, Any]) -> Optional[Cr
         source_url=f"https://www.douyin.com/video/{video_id}",
         title=title,
         create_time=create_time,
-        raw=item,
+        raw=raw,
         tags=[str(tag) for tag in tags],
         platform=creator_platform(creator),
     )
@@ -710,6 +852,298 @@ def parse_datetime_to_timestamp(value: Any) -> Optional[int]:
         return int(parsedate_to_datetime(text).timestamp())
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+X_RESERVED_PATHS = {
+    "home",
+    "explore",
+    "i",
+    "intent",
+    "login",
+    "logout",
+    "messages",
+    "notifications",
+    "search",
+    "settings",
+    "share",
+}
+
+
+def extract_x_username_from_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("@"):
+        return re.sub(r"[^A-Za-z0-9_]+", "", text[1:])[:50]
+    if not text.startswith(("http://", "https://")) and re.fullmatch(r"[A-Za-z0-9_]{1,50}", text):
+        return text
+    parsed = urlparse(text if text.startswith(("http://", "https://")) else f"https://{text}")
+    if "x.com" not in parsed.netloc and "twitter.com" not in parsed.netloc:
+        return ""
+    first = parsed.path.strip("/").split("/", 1)[0].strip()
+    if not first or first.lower() in X_RESERVED_PATHS:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_]+", "", first)[:50]
+
+
+def x_username_for_creator(creator: Dict[str, Any]) -> str:
+    for field in ("platform_id", "x_username", "twitter_username"):
+        value = extract_x_username_from_url(str(creator.get(field) or ""))
+        if value:
+            return value
+    return extract_x_username_from_url(str(creator.get("url") or ""))
+
+
+def opencli_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    extra_paths = [
+        str(Path.home() / ".npm-global/bin"),
+        str(Path.home() / ".local/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    env["PATH"] = ":".join([*extra_paths, env.get("PATH", "")])
+    return env
+
+
+def find_opencli() -> str:
+    env = opencli_env()
+    for directory in env["PATH"].split(":"):
+        candidate = Path(directory) / "opencli"
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which("opencli", path=env["PATH"]) or ""
+
+
+def opencli_daemon_status() -> Dict[str, Any]:
+    try:
+        response = httpx.get(
+            "http://127.0.0.1:19825/status",
+            headers={"X-OpenCLI": "1"},
+            timeout=2.0,
+        )
+        if response.status_code != 200:
+            return {}
+        payload = response.json()
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def open_chrome_for_opencli() -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        subprocess.run(
+            ["open", "-ga", "Google Chrome"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception:
+        return
+
+
+def ensure_opencli_bridge_ready(opencli: str, timeout_seconds: float = 14.0) -> None:
+    status = opencli_daemon_status()
+    if status.get("extensionConnected") and int(status.get("pending") or 0) == 0:
+        return
+
+    open_chrome_for_opencli()
+    subprocess.run(
+        [opencli, "daemon", "restart"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=opencli_env(),
+        cwd=str(PROJECT_ROOT),
+    )
+    deadline = time.time() + max(4.0, timeout_seconds)
+    while time.time() < deadline:
+        status = opencli_daemon_status()
+        if status.get("extensionConnected") and int(status.get("pending") or 0) == 0:
+            return
+        time.sleep(0.5)
+    raise RuntimeError(
+        "X 抓取前置检查失败：OpenCLI Browser Bridge 没有连上 Chrome。"
+        "请确认 Chrome 已打开，OpenCLI Browser Bridge 扩展已启用，然后重试。"
+    )
+
+
+def extract_json_payload(text: str) -> Any:
+    source = str(text or "").strip()
+    for start_char, end_char in (("[", "]"), ("{", "}")):
+        start = source.find(start_char)
+        end = source.rfind(end_char)
+        if start >= 0 and end > start:
+            try:
+                return json.loads(source[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+    raise RuntimeError("OpenCLI 没有返回可解析的 JSON")
+
+
+def x_tweet_id(tweet: Dict[str, Any], username: str) -> str:
+    for key in ("id", "id_str", "tweet_id", "status_id"):
+        value = str(tweet.get(key) or "").strip()
+        if value:
+            return value
+    raw_url = str(tweet.get("url") or tweet.get("link") or "").strip()
+    match = re.search(r"/status(?:es)?/(\d+)", raw_url)
+    if match:
+        return match.group(1)
+    seed = "|".join(
+        [
+            username,
+            str(tweet.get("created_at") or ""),
+            str(tweet.get("text") or tweet.get("content") or ""),
+        ]
+    )
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def normalize_x_tweets(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("tweets", "data", "items", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        if any(key in payload for key in ("text", "url", "created_at")):
+            return [payload]
+    return []
+
+
+def x_media_text(tweet: Dict[str, Any]) -> str:
+    media_urls = tweet.get("media_urls") or tweet.get("media") or []
+    if isinstance(media_urls, str):
+        media_urls = [item.strip() for item in re.split(r"[\s,]+", media_urls) if item.strip()]
+    if not isinstance(media_urls, list):
+        return ""
+    urls = [str(item).strip() for item in media_urls if str(item).strip()]
+    if not urls:
+        return ""
+    return "\n\n媒体：\n" + "\n".join(f"- {url}" for url in urls)
+
+
+def x_tweet_url(username: str, tweet: Dict[str, Any], tweet_id: str) -> str:
+    raw_url = str(tweet.get("url") or tweet.get("link") or "").strip()
+    if raw_url.startswith("http"):
+        return raw_url
+    return f"https://x.com/{username}/status/{tweet_id}"
+
+
+def x_tweet_to_video(creator: Dict[str, Any], tweet: Dict[str, Any], username: str) -> Optional[CreatorVideo]:
+    text = strip_html_text(str(tweet.get("text") or tweet.get("content") or tweet.get("full_text") or ""))
+    if not text:
+        return None
+    tweet_id = x_tweet_id(tweet, username)
+    original_text = f"{text}{x_media_text(tweet)}".strip()
+    tags = creator.get("tags") or ["x", "推文"]
+    if not isinstance(tags, list):
+        tags = ["x", "推文"]
+    raw = dict(tweet)
+    raw["original_text"] = original_text
+    raw["x_username"] = username
+
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=str(creator.get("name") or f"@{username}"),
+        video_id=f"x_{tweet_id}",
+        source_url=x_tweet_url(username, tweet, tweet_id),
+        title=compact_title(text, tweet_id),
+        create_time=parse_datetime_to_timestamp(tweet.get("created_at") or tweet.get("date") or tweet.get("time")),
+        raw=raw,
+        tags=[str(tag) for tag in tags],
+        platform="x",
+    )
+
+
+async def fetch_x_posts(
+    creator: Dict[str, Any],
+    config: Dict[str, Any],
+    scan_limit: int = 0,
+    full_history: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+    run_id: Optional[str] = None,
+) -> List[CreatorVideo]:
+    username = x_username_for_creator(creator)
+    if not username:
+        raise RuntimeError("X 来源缺少用户名。请填写 https://x.com/用户名 或 @用户名。")
+    opencli = find_opencli()
+    if not opencli:
+        raise RuntimeError("未找到 OpenCLI。X 抓取需要 Agent-Reach/OpenCLI：请先确认 opencli twitter tweets --help 可运行。")
+    fetch_cfg = config.get("fetch", {}) if isinstance(config.get("fetch"), dict) else {}
+    default_limit = int(fetch_cfg.get("x_count_per_page", fetch_cfg.get("twitter_count_per_page", 50)) or 50)
+    if full_history:
+        limit = int(scan_limit or fetch_cfg.get("x_full_limit", 3200) or 3200)
+    else:
+        limit = int(scan_limit or default_limit)
+    limit = max(1, min(limit, int(fetch_cfg.get("x_max_limit", 3200) or 3200)))
+    timeout = float(fetch_cfg.get("x_timeout_seconds", 90))
+    if conn and run_id:
+        update_run(conn, run_id, current_stage=f"嗅探 X @{username}", current_creator=str(creator.get("name") or f"@{username}"))
+    command = [opencli, "twitter", "tweets", username, "--limit", str(limit), "-f", "json"]
+    ensure_opencli_bridge_ready(opencli)
+    result: Optional[subprocess.CompletedProcess[str]] = None
+    last_detail = ""
+    for attempt in range(2):
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=opencli_env(),
+                cwd=str(PROJECT_ROOT),
+            )
+        except subprocess.TimeoutExpired:
+            last_detail = f"OpenCLI 超过 {int(timeout)} 秒没有返回"
+            result = None
+        if result and result.returncode == 0:
+            break
+        if result:
+            last_detail = (result.stderr or result.stdout or "").strip()[:1000]
+        if attempt == 0:
+            if conn and run_id:
+                update_run(conn, run_id, current_stage=f"重启 X 桥接后重试 @{username}")
+            subprocess.run(
+                [opencli, "daemon", "restart"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=opencli_env(),
+                cwd=str(PROJECT_ROOT),
+            )
+            ensure_opencli_bridge_ready(opencli)
+            continue
+        if "BROWSER_CONNECT" in last_detail or "Browser Bridge extension not connected" in last_detail:
+            raise RuntimeError(
+                "X 抓取失败：OpenCLI 已安装，但 Chrome 里的 Browser Bridge 扩展没有连接。"
+                "请打开 Chrome，确认 OpenCLI Browser Bridge 扩展已启用；如果已启用，先运行 "
+                "`opencli daemon restart && opencli doctor` 后重试。"
+            )
+        if "aborted" in last_detail.lower() or "operation was aborted" in last_detail.lower():
+            raise RuntimeError("X 抓取失败：OpenCLI 浏览器命令被 Chrome 中断。请重新加载 Browser Bridge 扩展，或重启 Chrome 后重试。")
+        if "超时" in last_detail or "TimeoutExpired" in last_detail or "没有返回" in last_detail:
+            raise RuntimeError("X 抓取失败：OpenCLI 长时间没有返回。系统已自动重启 daemon 并重试一次，仍失败；建议重启 Chrome 后再跑。")
+        raise RuntimeError(f"X 抓取失败。请确认 Chrome 里 x.com 已登录，或先运行 opencli twitter tweets {username} --limit 5 -f json。{last_detail}")
+    if not result or result.returncode != 0:
+        raise RuntimeError("X 抓取失败：OpenCLI 没有返回有效结果。")
+    tweets = normalize_x_tweets(extract_json_payload(result.stdout))
+    videos: List[CreatorVideo] = []
+    seen: set[str] = set()
+    for tweet in tweets:
+        video = x_tweet_to_video(creator, tweet, username)
+        if not video or video.video_id in seen:
+            continue
+        videos.append(video)
+        seen.add(video.video_id)
+    if conn and run_id:
+        update_run(conn, run_id, current_stage=f"嗅探 X 完成 @{username}", detected_count=len(videos))
+    return videos
 
 
 def xiaoyuzhou_headers(referer: str = "https://www.xiaoyuzhoufm.com/") -> Dict[str, str]:
@@ -1594,6 +2028,7 @@ def build_xiaohongshu_video_from_payload(creator: Dict[str, Any], url: str, payl
         "xhs_downloader": payload,
         "xhs_downloader_used": True,
     }
+    raw.update(creator_runtime_options(creator))
     return CreatorVideo(
         creator_key=str(creator["key"]),
         creator_name=clean_wechat_text(author) or str(creator.get("name") or creator["key"]),
@@ -2401,6 +2836,8 @@ async def fetch_creator_videos(
         )
     if platform == "weibo":
         return await fetch_weibo_posts(creator, config, scan_limit, full_history, conn, run_id)
+    if platform == "x":
+        return await fetch_x_posts(creator, config, scan_limit, full_history, conn, run_id)
     if platform == "xiaoyuzhou":
         return await fetch_xiaoyuzhou_episodes(creator, config, scan_limit, full_history, conn, run_id)
     if platform == "wechat":
@@ -2412,7 +2849,10 @@ async def fetch_creator_videos(
         sec_user_id = await crawler.DouyinWebCrawler.get_sec_user_id(str(creator["url"]))
 
     count = int(fetch_cfg.get("count_per_page", 20))
-    max_pages = int(fetch_cfg.get("max_pages", 2))
+    if full_history:
+        max_pages = int(fetch_cfg.get("douyin_full_max_pages", fetch_cfg.get("max_pages", 50)))
+    else:
+        max_pages = int(fetch_cfg.get("max_pages", 2))
     delay = float(fetch_cfg.get("delay_seconds", 2))
 
     videos: List[CreatorVideo] = []
@@ -2634,6 +3074,8 @@ def summary_prompt_path(video: CreatorVideo, cfg: Dict[str, Any]) -> Path:
         return project_path(str(cfg.get("podcast_prompt", "local_tools/obsidian_sync/prompts/podcast_summarize.md")))
     if video.platform == "weibo":
         return project_path(str(cfg.get("weibo_prompt", "local_tools/obsidian_sync/prompts/weibo_summarize.md")))
+    if video.platform == "x":
+        return project_path(str(cfg.get("x_prompt", cfg.get("weibo_prompt", "local_tools/obsidian_sync/prompts/weibo_summarize.md"))))
     if video.platform == "wechat":
         return project_path(str(cfg.get("wechat_prompt", "local_tools/obsidian_sync/prompts/wechat_summarize.md")))
     return project_path(str(cfg.get("prompt", "local_tools/obsidian_sync/prompts/summarize.md")))
@@ -2649,6 +3091,16 @@ def summary_user_content(video: CreatorVideo, transcript: str) -> str:
             f"- 链接：{video.source_url}\n"
             f"- 发布时间：{published}\n\n"
             "微博原文：\n"
+            f"{transcript}"
+        )
+    if video.platform == "x":
+        return (
+            "X/Twitter 推文元数据：\n"
+            f"- 作者：{video.creator_name}\n"
+            f"- 标题/首句：{video.title}\n"
+            f"- 链接：{video.source_url}\n"
+            f"- 发布时间：{published}\n\n"
+            "推文原文：\n"
             f"{transcript}"
         )
     if video.platform == "wechat":
@@ -2723,16 +3175,43 @@ def split_text_by_chars(text: str, limit: int) -> List[str]:
     return [chunk for chunk in chunks if chunk]
 
 
-def deepseek_chat_completion(cfg: Dict[str, Any], messages: List[Dict[str, str]], *, max_tokens: Optional[int] = None) -> str:
-    api_key_env = str(cfg.get("api_key_env", "DEEPSEEK_API_KEY"))
+def ai_provider_defaults(provider: str) -> Dict[str, str]:
+    normalized = provider.lower().strip()
+    if normalized in {"glm", "zhipu", "bigmodel"}:
+        return {
+            "label": "GLM",
+            "api_key_env": "GLM_API_KEY",
+            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+            "model": "glm-5-turbo",
+        }
+    if normalized == "deepseek":
+        return {
+            "label": "DeepSeek",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+        }
+    return {
+        "label": provider or "AI",
+        "api_key_env": "AI_API_KEY",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+    }
+
+
+def chat_completion(cfg: Dict[str, Any], messages: List[Dict[str, str]], *, max_tokens: Optional[int] = None) -> str:
+    provider = str(cfg.get("provider", "deepseek")).lower().strip()
+    defaults = ai_provider_defaults(provider)
+    api_key_env = str(cfg.get("api_key_env") or defaults["api_key_env"])
     api_key = os.environ.get(api_key_env)
     if not api_key:
         raise RuntimeError(f"Missing {api_key_env}. Put it in local_tools/obsidian_sync/.env.")
-    base_url = str(cfg.get("base_url", "https://api.deepseek.com")).rstrip("/")
+    base_url = str(cfg.get("base_url") or defaults["base_url"]).rstrip("/")
     endpoint = f"{base_url}/chat/completions"
-    model = str(cfg.get("model", "deepseek-v4-flash"))
+    model = str(cfg.get("model") or defaults["model"])
     model_aliases = {
         "deepseek-v4": "deepseek-v4-pro",
+        "GLM-5.2": "glm-5.2",
     }
     model = model_aliases.get(model, model)
 
@@ -2741,9 +3220,11 @@ def deepseek_chat_completion(cfg: Dict[str, Any], messages: List[Dict[str, str]]
         "messages": messages,
         "stream": False,
         "max_tokens": int(max_tokens or cfg.get("max_tokens", 5000)),
-        "thinking": {"type": str(cfg.get("thinking", "disabled"))},
     }
-    if str(cfg.get("thinking", "disabled")) == "disabled":
+    thinking = cfg.get("thinking")
+    if thinking:
+        payload["thinking"] = {"type": str(thinking)}
+    if str(thinking or "disabled") == "disabled":
         payload["temperature"] = float(cfg.get("temperature", 0.2))
 
     with httpx.Client(timeout=httpx.Timeout(180.0)) as client:
@@ -2767,15 +3248,19 @@ def deepseek_chat_completion(cfg: Dict[str, Any], messages: List[Dict[str, str]]
             except ValueError:
                 pass
             detail = detail[:800] or response.reason_phrase
-            raise RuntimeError(f"DeepSeek API {response.status_code}: {detail}")
+            raise RuntimeError(f"{defaults['label']} API {response.status_code}: {detail}")
         data = response.json()
 
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(f"Unexpected DeepSeek response: {data}") from exc
+        raise RuntimeError(f"Unexpected {defaults['label']} response: {data}") from exc
 
     return str(content).strip()
+
+
+def deepseek_chat_completion(cfg: Dict[str, Any], messages: List[Dict[str, str]], *, max_tokens: Optional[int] = None) -> str:
+    return chat_completion(cfg, messages, max_tokens=max_tokens)
 
 
 def chunk_podcast_transcript(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> Optional[str]:
@@ -2802,7 +3287,7 @@ def chunk_podcast_transcript(video: CreatorVideo, transcript: str, cfg: Dict[str
             f"分块：{index}/{len(chunks)}\n\n"
             f"{chunk}"
         )
-        summary = deepseek_chat_completion(
+        summary = chat_completion(
             cfg,
             [
                 {"role": "system", "content": chunk_prompt},
@@ -2814,7 +3299,7 @@ def chunk_podcast_transcript(video: CreatorVideo, transcript: str, cfg: Dict[str
     return "\n\n".join(summaries)
 
 
-def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> str:
+def call_ai_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> str:
     prompt_path = summary_prompt_path(video, cfg)
     system_prompt = prompt_path.read_text(encoding="utf-8")
     chunked = chunk_podcast_transcript(video, transcript, cfg)
@@ -2835,7 +3320,7 @@ def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, A
     else:
         user_content = summary_user_content(video, transcript)
 
-    return deepseek_chat_completion(
+    return chat_completion(
         cfg,
         [
             {"role": "system", "content": system_prompt},
@@ -2844,10 +3329,19 @@ def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, A
     )
 
 
-def build_frontmatter(video: CreatorVideo, status: str) -> str:
-    tag_lines = "\n".join(f"  - {tag}" for tag in video.tags)
+def call_deepseek_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> str:
+    return call_ai_summary(video, transcript, cfg)
+
+
+def build_frontmatter(video: CreatorVideo, status: str, *, summary: str = "", body: str = "") -> str:
+    tags = assign_tags(platform=video.platform, title=video.title, summary=summary, body=body)
+    tag_lines = "\n".join(f"  - {tag}" for tag in tags)
     if video.platform == "weibo":
         id_field = "post_id"
+        author_field = "author"
+        author_key_field = "author_key"
+    elif video.platform == "x":
+        id_field = "tweet_id"
         author_field = "author"
         author_key_field = "author_key"
     elif video.platform == "wechat":
@@ -2879,7 +3373,7 @@ def build_frontmatter(video: CreatorVideo, status: str) -> str:
 
 
 def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
-    frontmatter = build_frontmatter(video, status)
+    frontmatter = build_frontmatter(video, status, summary=summary, body=transcript)
     title = video.title if video.title != video.video_id else f"抖音视频 {video.video_id}"
     parts = [
         frontmatter,
@@ -2897,7 +3391,7 @@ def build_douyin_markdown(video: CreatorVideo, summary: str, transcript: str, st
 
 
 def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, status: str, include_transcript: bool = True) -> str:
-    frontmatter = build_frontmatter(video, status)
+    frontmatter = build_frontmatter(video, status, summary=summary, body=original_text)
     title = video.title if video.title != video.video_id else f"微博 {format_date(video.create_time)}"
     parts = [
         frontmatter,
@@ -2919,8 +3413,31 @@ def build_weibo_markdown(video: CreatorVideo, summary: str, original_text: str, 
     return "".join(parts)
 
 
+def build_x_markdown(video: CreatorVideo, summary: str, original_text: str, status: str, include_transcript: bool = True) -> str:
+    frontmatter = build_frontmatter(video, status, summary=summary, body=original_text)
+    title = video.title if video.title != video.video_id else f"X 推文 {format_date(video.create_time)}"
+    parts = [
+        frontmatter,
+        f"# {title}\n\n",
+        f"[原推文]({video.source_url})\n\n",
+    ]
+    if include_transcript:
+        parts.extend(["## 原文\n\n", f"{original_text.strip()}\n\n"])
+    summary = summary.strip()
+    if summary:
+        parts.append(f"{summary}\n\n")
+    parts.append("## 笔记\n\n")
+    if status == "raw":
+        parts.append("<!-- Claudian: 在此处生成要点提炼 -->\n\n")
+    else:
+        parts.append("<!-- 在这里补充自己的理解、链接或后续追踪。 -->\n\n")
+    parts.append("## 相关链接\n\n")
+    parts.append(f"- 原推文：{video.source_url}\n")
+    return "".join(parts)
+
+
 def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str, status: str, include_transcript: bool = True) -> str:
-    frontmatter = build_frontmatter(video, status)
+    frontmatter = build_frontmatter(video, status, summary=summary, body=original_text)
     title = video.title if video.title != video.video_id else f"公众号文章 {format_date(video.create_time)}"
     description = str(video.raw.get("description_text") or "").strip()
     description_section = f"## 导语\n\n{description}\n\n" if description else ""
@@ -2947,7 +3464,7 @@ def build_wechat_markdown(video: CreatorVideo, summary: str, original_text: str,
 
 
 def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
-    frontmatter = build_frontmatter(video, status)
+    frontmatter = build_frontmatter(video, status, summary=summary, body=transcript)
     title = video.title if video.title != video.video_id else f"播客单集 {format_date(video.create_time)}"
     description = str(video.raw.get("description_text") or "").strip()
     shownotes_section = f"## Shownotes\n\n{description}\n\n" if description else ""
@@ -2968,11 +3485,11 @@ def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, s
 
 
 def build_xiaohongshu_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
-    frontmatter = build_frontmatter(video, status)
     title = video.title if video.title != video.video_id else f"小红书笔记 {format_date(video.create_time)}"
     original_text = str(video.raw.get("original_text") or "").strip()
     image_paths = [str(item) for item in (video.raw.get("image_local_paths") or []) if str(item).strip()]
     video_transcript = transcript.strip()
+    frontmatter = build_frontmatter(video, status, summary=summary, body=f"{original_text}\n\n{video_transcript}")
     parts = [
         frontmatter,
         f"# {title}\n\n",
@@ -2999,6 +3516,8 @@ def build_xiaohongshu_markdown(video: CreatorVideo, summary: str, transcript: st
 def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
     if video.platform == "weibo":
         return build_weibo_markdown(video, summary, transcript, status, include_transcript)
+    if video.platform == "x":
+        return build_x_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "wechat":
         return build_wechat_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "xiaoyuzhou":
@@ -3169,8 +3688,8 @@ async def process_video(
 
     try:
         print(f"PROCESS {video.creator_name} {video.video_id} {video.title}")
-        if video.platform in {"weibo", "wechat"}:
-            source_label = "微博" if video.platform == "weibo" else "公众号"
+        if video.platform in {"weibo", "wechat", "x"}:
+            source_label = {"weibo": "微博", "wechat": "公众号", "x": "X 推文"}.get(video.platform, "文本")
             if run_id:
                 update_run(conn, run_id, current_stage=f"读取{source_label}正文", current_creator=video.creator_name, current_video_id=video.video_id)
                 upsert_run_item(conn, run_id, video, "running", f"读取{source_label}正文")
@@ -3200,7 +3719,7 @@ async def process_video(
                     if run_id:
                         update_run(conn, run_id, current_stage="AI 总结", current_creator=video.creator_name, current_video_id=video.video_id)
                         upsert_run_item(conn, run_id, video, "running", "AI 总结")
-                    summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, summary_config_for_video(video, config))
+                    summary = await asyncio.to_thread(call_ai_summary, video, transcript, summary_config_for_video(video, config))
                     status = "ok"
                 except Exception as exc:  # noqa: BLE001 - keep original text even if summary fails.
                     summary = f"## 要点\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
@@ -3268,7 +3787,7 @@ async def process_video(
                     if run_id:
                         update_run(conn, run_id, current_stage="AI 总结", current_creator=video.creator_name, current_video_id=video.video_id)
                         upsert_run_item(conn, run_id, video, "running", "AI 总结")
-                    summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, summary_config_for_video(video, config))
+                    summary = await asyncio.to_thread(call_ai_summary, video, transcript, summary_config_for_video(video, config))
                     status = "ok"
                 except Exception as exc:  # noqa: BLE001
                     summary = f"## 要点\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
@@ -3330,7 +3849,7 @@ async def process_video(
                     if run_id:
                         update_run(conn, run_id, current_stage="AI 整理长播客", current_creator=video.creator_name, current_video_id=video.video_id)
                         upsert_run_item(conn, run_id, video, "running", "AI 整理长播客")
-                    summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, summary_config_for_video(video, config))
+                    summary = await asyncio.to_thread(call_ai_summary, video, transcript, summary_config_for_video(video, config))
                     status = "ok"
                 except Exception as exc:  # noqa: BLE001 - keep transcript even if summary fails.
                     summary = f"## 摘要\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
@@ -3359,19 +3878,34 @@ async def process_video(
             print(f"WROTE {markdown_path}")
             return status
 
+        transcript_mode = transcript_mode_for_video(video)
         if run_id:
             update_run(conn, run_id, current_stage="下载视频", current_creator=video.creator_name, current_video_id=video.video_id)
             upsert_run_item(conn, run_id, video, "running", "下载视频")
         video_path = await download_video_to_temp(crawler, video, config.get("download", {}), media_dir)
-        if run_id:
-            update_run(conn, run_id, current_stage="提取音频", current_creator=video.creator_name, current_video_id=video.video_id)
-            upsert_run_item(conn, run_id, video, "running", "提取音频")
-        audio_path = media_dir / f"{video.video_id}.wav"
-        await asyncio.to_thread(extract_audio, video_path, audio_path)
-        if run_id:
-            update_run(conn, run_id, current_stage="转录音频", current_creator=video.creator_name, current_video_id=video.video_id)
-            upsert_run_item(conn, run_id, video, "running", "转录音频")
-        transcript = await asyncio.to_thread(transcribe_audio, audio_path, config.get("transcribe", {}))
+
+        transcript = ""
+        if transcript_mode in {"subtitle_ocr", "subtitle_ocr_fallback_audio"}:
+            if run_id:
+                update_run(conn, run_id, current_stage="字幕 OCR", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "字幕 OCR")
+            try:
+                transcript = await asyncio.to_thread(transcribe_subtitles_from_video, video_path, config)
+            except Exception as exc:  # noqa: BLE001 - optional fallback mode keeps processing.
+                if transcript_mode == "subtitle_ocr":
+                    raise
+                print(f"FALLBACK {video.video_id} 字幕 OCR 失败，改用音频转录：{type(exc).__name__}: {exc}")
+
+        if not transcript:
+            if run_id:
+                update_run(conn, run_id, current_stage="提取音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "提取音频")
+            audio_path = media_dir / f"{video.video_id}.wav"
+            await asyncio.to_thread(extract_audio, video_path, audio_path)
+            if run_id:
+                update_run(conn, run_id, current_stage="转录音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "转录音频")
+            transcript = await asyncio.to_thread(transcribe_audio, audio_path, config.get("transcribe", {}))
 
         if skip_summary:
             summary = ""
@@ -3381,7 +3915,7 @@ async def process_video(
                 if run_id:
                     update_run(conn, run_id, current_stage="AI 总结", current_creator=video.creator_name, current_video_id=video.video_id)
                     upsert_run_item(conn, run_id, video, "running", "AI 总结")
-                summary = await asyncio.to_thread(call_deepseek_summary, video, transcript, summary_config_for_video(video, config))
+                summary = await asyncio.to_thread(call_ai_summary, video, transcript, summary_config_for_video(video, config))
                 status = "ok"
             except Exception as exc:  # noqa: BLE001 - keep transcript even if summary fails.
                 summary = f"## 摘要\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
@@ -3442,8 +3976,11 @@ async def sync(args: argparse.Namespace) -> int:
 
     vault_path = Path(str(config["vault_path"])).expanduser()
     creators = [creator for creator in config.get("creators", []) if creator.get("enabled", True)]
+    selected_creator_keys = parse_video_id_filter(args.creators)
     if args.creator:
-        creators = [creator for creator in creators if str(creator.get("key")) == args.creator]
+        selected_creator_keys.add(str(args.creator))
+    if selected_creator_keys:
+        creators = [creator for creator in creators if str(creator.get("key")) in selected_creator_keys]
     skipped_platform_creators = [
         creator for creator in creators
         if creator_platform(creator) not in RUNNABLE_PLATFORMS
@@ -3459,7 +3996,7 @@ async def sync(args: argparse.Namespace) -> int:
     ]
 
     if not creators:
-        print("No enabled runnable creators. Current runnable platforms: douyin, weibo, xiaoyuzhou, wechat.")
+        print("No enabled runnable creators. Current runnable platforms: douyin, weibo, x, xiaoyuzhou, wechat, xiaohongshu.")
         return 0
 
     final_output_path = (
@@ -3467,7 +4004,8 @@ async def sync(args: argparse.Namespace) -> int:
         if len(creators) == 1
         else vault_path
     )
-    start_run(conn, run_id, args.creator, len(creators))
+    creator_filter = args.creator or (",".join(sorted(selected_creator_keys)) if selected_creator_keys else None)
+    start_run(conn, run_id, creator_filter, len(creators))
     print(f"RUN {run_id}")
     max_concurrency = configured_concurrency(config, args.concurrency)
     print(f"CONCURRENCY {max_concurrency}")
@@ -3475,10 +4013,19 @@ async def sync(args: argparse.Namespace) -> int:
     total_seen = 0
     total_processed = 0
     had_errors = False
+    paused = False
+    recent_cutoff = recent_cutoff_timestamp(args)
+    if recent_cutoff:
+        print(f"RECENT_DAYS {int(args.recent_days)} cutoff={datetime.fromtimestamp(recent_cutoff, timezone.utc).isoformat(timespec='seconds')}")
 
     try:
         total_creators = len(creators)
         for creator_index, creator in enumerate(creators, start=1):
+            if pause_requested(args):
+                paused = True
+                update_run(conn, run_id, current_stage="已暂停，等待继续", current_creator="", current_video_id="")
+                print("PAUSE requested before next creator")
+                break
             if not creator.get("key") or not creator.get("url"):
                 print(f"SKIP invalid creator entry: {creator}")
                 continue
@@ -3488,23 +4035,48 @@ async def sync(args: argparse.Namespace) -> int:
             output_base = output_base_for_platform(vault_path, config, platform)
             prerequisite_error = creator_prerequisite_error(config, creator)
             if prerequisite_error:
-                if args.creator:
-                    raise RuntimeError(prerequisite_error)
                 had_errors = True
                 print(f"SKIP {creator_name} {prerequisite_error}")
                 update_run(conn, run_id, current_stage="跳过未登录来源", current_creator=str(creator_name), current_video_id="", error=prerequisite_error)
+                error_video = source_error_video(creator, platform, run_id, prerequisite_error)
+                upsert_run_item(conn, run_id, error_video, "failed", "来源登录态缺失", prerequisite_error)
                 continue
-            apply_cookie_for_creator(config, creator)
+            try:
+                apply_cookie_for_creator(config, creator)
+            except Exception as exc:  # noqa: BLE001 - isolate one bad source.
+                message = f"{type(exc).__name__}: {exc}"
+                had_errors = True
+                print(f"ERROR source {creator_name} {message}")
+                update_run(conn, run_id, current_stage="来源准备失败", current_creator=str(creator_name), current_video_id="", error=message)
+                error_video = source_error_video(creator, platform, run_id, message)
+                upsert_run_item(conn, run_id, error_video, "failed", "来源准备失败", message)
+                continue
             update_run(conn, run_id, current_stage="嗅探内容", current_creator=str(creator_name), current_video_id="")
             print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
             print(f"OUTPUT {platform} {output_base}")
             print(f"FETCH {creator_name}")
-            scan_limit = int(args.limit or 0) if platform in {"weibo", "xiaoyuzhou", "wechat", "xiaohongshu"} and not args.full_history else 0
-            videos = await fetch_creator_videos(crawler, creator, config, scan_limit, args.full_history, conn, run_id)
+            scan_limit = int(args.limit or 0) if platform in {"weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"} and not args.full_history else 0
+            try:
+                videos = await fetch_creator_videos(crawler, creator, config, scan_limit, args.full_history, conn, run_id)
+            except Exception as exc:  # noqa: BLE001 - one source must not break the full run.
+                message = f"{type(exc).__name__}: {exc}"
+                had_errors = True
+                print(f"ERROR source {creator_name} {message}")
+                update_run(conn, run_id, current_stage="嗅探失败，继续下一个来源", current_creator=str(creator_name), current_video_id="", error=message)
+                error_video = source_error_video(creator, platform, run_id, message)
+                upsert_run_item(conn, run_id, error_video, "failed", "嗅探失败", message)
+                continue
+            if pause_requested(args):
+                paused = True
+                update_run(conn, run_id, current_stage="已暂停，等待继续", current_creator=str(creator_name), current_video_id="")
+                print(f"PAUSE requested after sniffing {creator_name}")
+                break
             total_seen += len(videos)
             update_run(conn, run_id, detected_count=total_seen)
             if platform == "weibo":
                 item_label = "posts"
+            elif platform == "x":
+                item_label = "tweets"
             elif platform == "xiaoyuzhou":
                 item_label = "episodes"
             elif platform == "wechat":
@@ -3520,10 +4092,29 @@ async def sync(args: argparse.Namespace) -> int:
                 if selected_video_ids and video.video_id not in selected_video_ids:
                     continue
                 mark_seen(conn, video)
+                if recent_cutoff and video.create_time and int(video.create_time) < recent_cutoff:
+                    upsert_run_item(
+                        conn,
+                        run_id,
+                        video,
+                        "skipped",
+                        "超出每日更新窗口",
+                        f"发布时间早于最近 {int(args.recent_days)} 天，本轮跳过",
+                    )
+                    continue
                 status = get_status(conn, video.video_id)
                 if status == "ok" and not args.force:
                     upsert_run_item(conn, run_id, video, "skipped", "已存在", "之前已成功处理，本轮跳过")
                     continue
+                if status == "filtered" and creator_promotion_filter_enabled(creator, config, args) and not args.force:
+                    upsert_run_item(conn, run_id, video, "skipped", "已过滤", "之前已判定为商单/推广/直播通告，本轮跳过")
+                    continue
+                if creator_promotion_filter_enabled(creator, config, args):
+                    filter_reason = promotion_filter_reason(video, config)
+                    if filter_reason:
+                        mark_result(conn, video, "filtered", None, filter_reason, 0)
+                        upsert_run_item(conn, run_id, video, "skipped", "已过滤低价值内容", filter_reason)
+                        continue
                 candidates.append(video)
                 upsert_run_item(conn, run_id, video, "pending", "等待处理")
 
@@ -3538,52 +4129,87 @@ async def sync(args: argparse.Namespace) -> int:
 
             if args.dry_run:
                 for video_index, video in enumerate(candidates, start=1):
+                    if pause_requested(args):
+                        paused = True
+                        update_run(conn, run_id, current_stage="已暂停，等待继续", current_creator=video.creator_name, current_video_id="")
+                        print(f"PAUSE requested during dry run {video.creator_name}")
+                        break
                     update_run(conn, run_id, current_stage="处理视频", current_creator=video.creator_name, current_video_id=video.video_id)
                     print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
                     upsert_run_item(conn, run_id, video, "dry_run", "候选", "只嗅探候选内容，未下载、未转录、未写入")
                     print(f"DRY {video.creator_name} {video.video_id} {video.title} {video.source_url}")
+                if paused:
+                    break
                 continue
 
-            semaphore = asyncio.Semaphore(max_concurrency)
             delay = float(config.get("fetch", {}).get("delay_seconds", 2))
             sync_cfg = config.get("sync") if isinstance(config.get("sync"), dict) else {}
             stagger = float(sync_cfg.get("stagger_seconds", min(delay, 1.0)))
 
             async def run_candidate(video_index: int, video: CreatorVideo) -> str:
-                async with semaphore:
+                update_run(
+                    conn,
+                    run_id,
+                    current_stage="处理视频",
+                    current_creator=video.creator_name,
+                    current_video_id=video.video_id,
+                )
+                print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
+                return await process_video(
+                    crawler=crawler,
+                    conn=conn,
+                    video=video,
+                    config=config,
+                    output_base=output_base,
+                    skip_summary=args.skip_summary or not args.with_ai_summary,
+                    no_cleanup=args.no_cleanup,
+                    run_id=run_id,
+                )
+
+            active: set[asyncio.Task[str]] = set()
+            next_index = 0
+            while next_index < len(candidates) or active:
+                while next_index < len(candidates) and len(active) < max_concurrency and not pause_requested(args):
+                    video = candidates[next_index]
+                    active.add(asyncio.create_task(run_candidate(next_index + 1, video)))
+                    next_index += 1
+                    if stagger > 0 and next_index < len(candidates) and len(active) < max_concurrency:
+                        await asyncio.sleep(stagger)
+                if pause_requested(args) and next_index < len(candidates):
+                    paused = True
                     update_run(
                         conn,
                         run_id,
-                        current_stage="处理视频",
-                        current_creator=video.creator_name,
-                        current_video_id=video.video_id,
+                        current_stage="正在暂停，等待已开始的内容完成",
+                        current_creator=str(creator_name),
+                        current_video_id="",
                     )
-                    print(f"PROGRESS {video_index}/{len(candidates)} {video.video_id}")
-                    return await process_video(
-                        crawler=crawler,
-                        conn=conn,
-                        video=video,
-                        config=config,
-                        output_base=output_base,
-                        skip_summary=args.skip_summary or not args.with_deepseek,
-                        no_cleanup=args.no_cleanup,
-                        run_id=run_id,
-                    )
+                    print(f"PAUSE requested; wait active={len(active)} remaining={len(candidates) - next_index}")
+                if not active:
+                    break
+                done, active = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        result_status = task.result()
+                    except Exception as exc:  # noqa: BLE001 - keep the rest of the run alive.
+                        print(f"ERROR worker_task {type(exc).__name__}: {exc}")
+                        result_status = "error"
+                    if result_status not in ("ok", "raw"):
+                        had_errors = True
+                    total_processed += 1
+                if paused and not active:
+                    break
 
-            tasks = []
-            for video_index, video in enumerate(candidates, start=1):
-                tasks.append(asyncio.create_task(run_candidate(video_index, video)))
-                if stagger > 0 and video_index < len(candidates):
-                    await asyncio.sleep(stagger)
-
-            for result_status in await asyncio.gather(*tasks):
-                if result_status not in ("ok", "raw"):
-                    had_errors = True
-                total_processed += 1
+            if paused:
+                break
 
         update_run_counts(conn, run_id)
-        final_status = "done_with_errors" if had_errors else "done"
-        update_run(conn, run_id, status=final_status, current_stage="完成", output_path=final_output_path, ended=True)
+        final_status = "paused" if paused else ("done_with_errors" if had_errors else "done")
+        final_stage = "已暂停，点击继续后会跳过已完成内容" if paused else "完成"
+        update_run(conn, run_id, status=final_status, current_stage=final_stage, output_path=final_output_path, ended=True)
+        if paused:
+            print(f"PAUSED seen={total_seen} processed={total_processed} output={vault_path}")
+            return 0
         print(f"DONE seen={total_seen} processed={total_processed} output={vault_path}")
         return 0
     except Exception as exc:
@@ -3597,24 +4223,60 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync Douyin creator videos into Obsidian Markdown notes.")
     parser.add_argument("--config", default="local_tools/obsidian_sync/creators.yaml", help="YAML config path.")
     parser.add_argument("--creator", default=None, help="Only sync one creator key.")
+    parser.add_argument("--creators", action="append", default=None, help="Only sync selected creator keys. Repeat or pass comma-separated keys.")
     parser.add_argument("--video-id", action="append", default=None, help="Only process selected video id. Repeat or pass comma-separated ids.")
     parser.add_argument("--limit", type=int, default=0, help="Process at most N new videos per creator.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and list candidates without downloading.")
     parser.add_argument("--force", action="store_true", help="Reprocess videos already marked ok.")
     parser.add_argument("--skip-summary", action="store_true",
                         help="Write raw notes without AI summary.")
-    parser.add_argument("--with-deepseek", action="store_true", default=True,
-                        help="Call DeepSeek API for summaries. This is the default dashboard behaviour.")
+    parser.add_argument("--with-ai-summary", dest="with_ai_summary", action="store_true", default=True,
+                        help="Call the configured AI model for summaries. This is the default dashboard behaviour.")
+    parser.add_argument("--with-deepseek", dest="with_ai_summary", action="store_true",
+                        help="Deprecated alias for --with-ai-summary.")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep temporary video/audio files for debugging.")
     parser.add_argument("--run-id", default=None, help="Stable run id for dashboard tracking.")
     parser.add_argument("--concurrency", type=int, default=None, help="Parallel video pipelines per creator. Clamped to 1-2.")
     parser.add_argument("--full-history", action="store_true", help="Scan deep history for platforms that support it, e.g. Weibo and podcast RSS.")
+    parser.add_argument("--recent-days", type=int, default=0, help="Only process items published within the last N days. Older seen items are skipped for this run.")
+    parser.add_argument("--no-content-filter", action="store_true", help="Disable pre-download filters for sponsored, promotional, and live-announcement content.")
+    parser.add_argument("--pause-file", default="", help="Stop launching new work when this file exists, then mark the run paused.")
+    parser.add_argument("--allow-concurrent", action="store_true", help="Allow this sync process to run while another sync.py process is active.")
     return parser.parse_args()
 
 
-def main() -> int:
+def acquire_sync_lock(args: argparse.Namespace) -> bool:
+    global SYNC_LOCK_HANDLE
+    if args.allow_concurrent:
+        return True
     try:
-        return asyncio.run(sync(parse_args()))
+        config = load_yaml(project_path(args.config))
+        work_dir = project_path(str(config.get("work_dir", "local_tools/obsidian_sync/work")))
+    except Exception:
+        work_dir = PROJECT_ROOT / "local_tools/obsidian_sync/work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = work_dir / "sync.lock"
+    handle = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"SKIP another sync process is already running: lock={lock_path}", flush=True)
+        handle.close()
+        return False
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\nstarted_at={utc_now()}\ncommand={' '.join(sys.argv)}\n")
+    handle.flush()
+    SYNC_LOCK_HANDLE = handle
+    return True
+
+
+def main() -> int:
+    args = parse_args()
+    if not acquire_sync_lock(args):
+        return 0
+    try:
+        return asyncio.run(sync(args))
     except Exception as exc:  # noqa: BLE001 - dashboard should show the concise user-facing failure.
         if os.environ.get("OBSIDIAN_SYNC_DEBUG"):
             raise

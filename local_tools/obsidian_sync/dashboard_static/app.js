@@ -5,6 +5,8 @@ const state = {
   lastReturnCode: null,
   candidateSelections: {},
   runCreatorQuery: "",
+  creatorPage: 1,
+  creatorPageSize: 24,
   runItemPages: {},
   runItemOpen: {},
   inlineRunItems: {},
@@ -15,6 +17,7 @@ const $ = (id) => document.getElementById(id);
 const PLATFORM_META = {
   douyin: { label: "抖音", runnable: true, defaultTags: ["douyin", "口播"] },
   weibo: { label: "微博", runnable: true, defaultTags: ["weibo", "文字"] },
+  x: { label: "X", runnable: true, defaultTags: ["x", "推文"] },
   xiaoyuzhou: { label: "小宇宙", runnable: true, defaultTags: ["xiaoyuzhou", "播客"] },
   wechat: { label: "公众号", runnable: true, defaultTags: ["wechat", "公众号"] },
   xiaohongshu: { label: "小红书", runnable: true, defaultTags: ["xiaohongshu", "图文"] },
@@ -26,12 +29,45 @@ const PLATFORM_META = {
   zhihu: { label: "知乎", runnable: false, defaultTags: ["zhihu", "问答"] },
 };
 
+const TRANSCRIPT_MODE_META = {
+  auto: {
+    label: "自动",
+    shortLabel: "自动转录",
+    description: "默认模式。视频和播客用音频转录，图文/文章直接读取原文。",
+  },
+  audio: {
+    label: "音频转录",
+    shortLabel: "音频",
+    description: "强制使用音频转录，适合普通话或普通话接近的口播内容。",
+  },
+  subtitle_ocr: {
+    label: "字幕 OCR",
+    shortLabel: "字幕 OCR",
+    description: "适合方言、强口音但画面硬字幕清晰的视频。系统会抽取视频下方字幕区域并识别成文字稿。",
+  },
+  subtitle_ocr_fallback_audio: {
+    label: "字幕优先，音频兜底",
+    shortLabel: "字幕优先",
+    description: "优先读取画面字幕；如果字幕太少或识别失败，再回到音频转录。",
+  },
+};
+
+function normalizeTranscriptMode(value) {
+  const key = String(value || "auto").trim();
+  return TRANSCRIPT_MODE_META[key] ? key : "auto";
+}
+
+function transcriptModeMeta(value) {
+  return TRANSCRIPT_MODE_META[normalizeTranscriptMode(value)] || TRANSCRIPT_MODE_META.auto;
+}
+
 function inferPlatformFromUrl(url) {
   const text = String(url || "").toLowerCase();
   if (text.includes("mp.weixin.qq.com") || text.includes("weixin.qq.com")) return "wechat";
   if (text.includes("xiaohongshu.com") || text.includes("xhslink.com")) return "xiaohongshu";
   if (text.includes("xiaoyuzhoufm.com") || text.includes("feed.xyzfm.space") || text.includes("podcast.xyz")) return "xiaoyuzhou";
   if (text.includes("weibo.com") || text.includes("weibo.cn")) return "weibo";
+  if (text.includes("x.com") || text.includes("twitter.com")) return "x";
   if (text.includes("kuaishou.com") || text.includes("gifshow.com")) return "kuaishou";
   if (text.includes("tieba.baidu.com")) return "tieba";
   if (text.includes("zhihu.com")) return "zhihu";
@@ -54,6 +90,16 @@ function platformMeta(platform) {
 
 function platformLabel(platform) {
   return platformMeta(platform).label;
+}
+
+function creatorPlatformByKey(key) {
+  const creators = state.config?.creators || [];
+  const match = creators.find((creator) => String(creator.key || "") === String(key || ""));
+  return match ? normalizePlatform(match.platform, match.url) : "";
+}
+
+function healthItemPlatform(item) {
+  return creatorPlatformByKey(item.creator_key) || normalizePlatform("", item.source_url || "");
 }
 
 function isRunnablePlatform(platform) {
@@ -137,8 +183,12 @@ function renderWorkerBadge(worker) {
   const suffix = task ? ` · ${task}` : "";
   const el = $("workerBadge");
   el.title = progress.label || "";
-  if (worker.running) {
+  if (worker.running && worker.pausing) {
+    badge(el, `正在暂停 ${percent}%${suffix}`, "warn");
+  } else if (worker.running) {
     badge(el, `运行中 ${percent}%${suffix}`, "warn");
+  } else if (worker.paused || worker.can_resume) {
+    badge(el, `已暂停 ${percent}%${suffix}`, "warn");
   } else if (worker.returncode === 0) {
     badge(el, `完成 ${percent || 100}%${suffix}`, "ok");
   } else if (worker.returncode === null || worker.returncode === undefined) {
@@ -158,30 +208,191 @@ function browserLoginText(label, cookie, login) {
   return `建议点击“扫码登录”完成${label}登录`;
 }
 
+function serverAuthBadge(cookie, labels) {
+  if (cookie?.auth_state === "invalid" || cookie?.invalid) {
+    return { text: labels.invalid, state: "bad" };
+  }
+  if (cookie?.ready || cookie?.service_ready === true) {
+    return { text: labels.ok, state: "ok" };
+  }
+  if (cookie?.credential_ready || cookie?.exists) {
+    return { text: labels.pending, state: "warn" };
+  }
+  return { text: labels.missing, state: "" };
+}
+
+function serverAuthText(label, cookie, missingText) {
+  if (cookie?.auth_state === "invalid" || cookie?.invalid) {
+    return cookie.message || `${label}登录态已失效，请重新导入`;
+  }
+  if (cookie?.ready || cookie?.service_ready === true) {
+    return cookie.message || `${label}登录态可用`;
+  }
+  if (cookie?.credential_ready || cookie?.exists) {
+    return cookie.message || `${label}登录态已保存，等待下次抓取验证`;
+  }
+  return missingText;
+}
+
+function authVerifySummary(results = {}) {
+  const labels = { weibo: "微博", wechat: "公众号" };
+  return Object.entries(results)
+    .map(([platform, result]) => {
+      const state = result?.state === "ok" ? "OK" : result?.state === "invalid" ? "失效" : "待处理";
+      return `${labels[platform] || platform}${state}`;
+    })
+    .join("，");
+}
+
+function healthStateLabel(status) {
+  if (status === "ok") return "自检正常";
+  if (status === "warn") return "自检有问题";
+  if (status === "bad") return "自检需处理";
+  return "暂无自检";
+}
+
+function healthStateClass(status) {
+  if (status === "ok") return "ok";
+  if (status === "warn") return "warn";
+  if (status === "bad") return "bad";
+  return "";
+}
+
+function shortText(value, limit = 96) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit).trim()}...`;
+}
+
+function renderHealth(health = {}) {
+  const status = String(health.status || "unknown");
+  const stateClass = healthStateClass(status);
+  const label = health.label || healthStateLabel(status);
+  if ($("healthBadge")) {
+    badge($("healthBadge"), label, stateClass);
+  }
+  if ($("healthSummary")) {
+    badge($("healthSummary"), `${label}${health.date ? ` · ${health.date}` : ""}`, stateClass);
+  }
+  const box = $("healthBox");
+  if (!box) return;
+  if (!health || status === "unknown") {
+    box.innerHTML = `<p class="empty">${escapeHtml(health.message || "还没有生成每日自检报告")}</p>`;
+    return;
+  }
+  const run = health.primary_run || {};
+  const missing = health.missing_sources || [];
+  const failed = health.failed_items || [];
+  const manual = health.manual_items || [];
+  const retryResults = health.retry_results || [];
+  const actions = health.actions || [];
+  const retryCount = retryResults.reduce((sum, item) => sum + Number((item.items || []).length || 0), 0);
+  const wechatFailed = failed.filter((item) => healthItemPlatform(item) === "wechat");
+  const authFailed = failed.some((item) => String(item.failure?.category || "") === "auth");
+  const retryActions = failed.length ? `
+    <div class="health-actions">
+      <button type="button" class="secondary small" data-action="health-retry" data-scope="all">重爬自检失败项 ${formatCount(failed.length)}</button>
+      ${wechatFailed.length ? `<button type="button" class="secondary small" data-action="health-retry" data-scope="platform" data-platform="wechat">只重爬公众号失败项 ${formatCount(wechatFailed.length)}</button>` : ""}
+      ${authFailed ? `<span>登录态类失败要先重新导入 Cookie/token，再点重爬。</span>` : ""}
+    </div>
+  ` : "";
+  box.innerHTML = `
+    <div class="health-grid">
+      <div class="health-card">
+        <strong>${escapeHtml(run.run_id || "未找到今日任务")}</strong>
+        <span>任务编号</span>
+      </div>
+      <div class="health-card">
+        <strong>${escapeHtml(run.status || "-")}</strong>
+        <span>任务状态</span>
+      </div>
+      <div class="health-card">
+        <strong>${formatCount(run.success_count || 0)}</strong>
+        <span>成功</span>
+      </div>
+      <div class="health-card ${failed.length ? "bad" : ""}">
+        <strong>${formatCount(failed.length)}</strong>
+        <span>失败</span>
+      </div>
+      <div class="health-card ${missing.length ? "bad" : ""}">
+        <strong>${formatCount(health.source_attempted || 0)}/${formatCount(health.source_total || 0)}</strong>
+        <span>来源覆盖</span>
+      </div>
+      <div class="health-card ${retryCount ? "warn" : ""}">
+        <strong>${formatCount(retryCount)}</strong>
+        <span>自动重试</span>
+      </div>
+    </div>
+    <div class="health-detail">
+      <p>检查时间：${escapeHtml(health.checked_at || "-")}</p>
+      ${health.report_path ? `<p>完整报告：${escapeHtml(health.report_path)}</p>` : ""}
+      ${retryActions}
+      ${missing.length ? `
+        <h4>漏扫来源</h4>
+        <ul>${missing.slice(0, 12).map((item) => `<li>${escapeHtml(item.name || item.key)} · ${escapeHtml(platformLabel(item.platform || ""))}</li>`).join("")}</ul>
+      ` : `<p>漏扫来源：无</p>`}
+      ${failed.length ? `
+        <h4>失败项</h4>
+        <ul>${failed.slice(0, 12).map((item) => {
+          const failure = item.failure || {};
+          return `<li>${escapeHtml(item.creator_name || item.creator_key || "")} · ${escapeHtml(failure.label || "失败")} · ${escapeHtml(shortText(item.title || item.video_id || ""))}</li>`;
+        }).join("")}</ul>
+      ` : `<p>失败项：无</p>`}
+      ${manual.length ? `<p class="health-warning">需要人工处理：${manual.length} 条，多半是登录态、权限或正文解析问题。</p>` : ""}
+      ${actions.length ? `
+        <h4>建议动作</h4>
+        <ul>${actions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      ` : `<p>建议动作：无需处理</p>`}
+    </div>
+  `;
+}
+
 function renderStatus(status) {
   const douyinCookie = status.accounts?.douyin?.cookie || status.cookie || {};
   const weiboCookie = status.accounts?.weibo?.cookie || {};
+  const xBackend = status.accounts?.x?.backend || status.platform_health?.x || {};
   const wechatCookie = status.accounts?.wechat?.cookie || {};
   const xiaohongshuCookie = status.accounts?.xiaohongshu?.cookie || {};
   const douyinLogin = status.accounts?.douyin?.browser_login || {};
   const xiaohongshuLogin = status.accounts?.xiaohongshu?.browser_login || {};
   badge($("douyinCookieBadge"), douyinCookie.ready ? "抖音 Cookie 已保存" : "抖音未登录", douyinCookie.ready ? "ok" : "bad");
-  badge($("weiboCookieBadge"), weiboCookie.ready ? "微博 Cookie OK" : "微博 Cookie 缺失", weiboCookie.ready ? "ok" : "");
-  badge($("wechatCookieBadge"), wechatCookie.ready ? "公众号后台 OK" : "公众号后台缺失", wechatCookie.ready ? "ok" : "");
+  const weiboBadge = serverAuthBadge(weiboCookie, {
+    ok: "微博登录 OK",
+    pending: "微博待验证",
+    invalid: "微博登录失效",
+    missing: "微博 Cookie 缺失",
+  });
+  badge($("weiboCookieBadge"), weiboBadge.text, weiboBadge.state);
+  const xBadgeText = xBackend.ready ? "X 后端 OK" : (xBackend.exists ? "X 桥接未连接" : "X 后端缺失");
+  badge($("xBackendBadge"), xBadgeText, xBackend.ready ? "ok" : (xBackend.exists ? "warn" : "bad"));
+  const wechatBadge = serverAuthBadge(wechatCookie, {
+    ok: "公众号后台 OK",
+    pending: "公众号待验证",
+    invalid: "公众号登录失效",
+    missing: "公众号后台缺失",
+  });
+  badge($("wechatCookieBadge"), wechatBadge.text, wechatBadge.state);
   badge($("xiaohongshuCookieBadge"), xiaohongshuCookie.ready ? "小红书 Cookie 已保存" : "小红书未登录", xiaohongshuCookie.ready ? "ok" : "");
   $("douyinAccountText").textContent = browserLoginText("抖音", douyinCookie, douyinLogin);
-  $("weiboAccountText").textContent = weiboCookie.ready ? "Cookie 已保存，可用于微博 URL 补全和文本抓取" : "未导入 Cookie；微博抓取需要先导入";
-  $("wechatAccountText").textContent = wechatCookie.ready ? "公众号后台登录态已保存，可按名称搜索并同步历史文章" : "未导入公众号后台登录态；按名称抓取需要先导入";
+  $("weiboAccountText").textContent = serverAuthText("微博", weiboCookie, "未导入 Cookie；微博抓取需要先导入");
+  $("xAccountText").textContent = xBackend.ready ? (xBackend.message || "OpenCLI 可用，会复用本机 X 登录态") : (xBackend.message || "未检测到 OpenCLI；X 抓取暂不可用");
+  $("wechatAccountText").textContent = serverAuthText("公众号后台", wechatCookie, "未导入公众号后台登录态；按名称抓取需要先导入");
   $("xiaohongshuAccountText").textContent = browserLoginText("小红书", xiaohongshuCookie, xiaohongshuLogin);
-  badge($("keyBadge"), status.deepseek.ready ? "DeepSeek OK" : "DeepSeek 缺失", status.deepseek.ready ? "ok" : "bad");
+  const modelApi = status.model_api || status.deepseek || {};
+  const providerLabel = (modelApi.provider || "模型").toUpperCase();
+  badge($("keyBadge"), modelApi.ready ? `${providerLabel} OK` : `${providerLabel} 缺失`, modelApi.ready ? "ok" : "bad");
   renderWorkerBadge(status.worker || {});
-  setRunControlsRunning(Boolean(status.worker.running));
+  renderHealth(status.health || {});
+  setRunControlsRunning(Boolean(status.worker.running), status.worker || {});
   $("subtitle").textContent = `${status.output.path}`;
 }
 
-function setRunControlsRunning(running) {
+function setRunControlsRunning(running, worker = {}) {
+  const supportsPause = Boolean(worker.pause_supported);
   $("scanCandidates").disabled = running;
   $("crawlCreatorAll").disabled = running;
+  $("pauseRun").disabled = !supportsPause || !running || Boolean(worker.pausing);
+  $("resumeRun").disabled = !supportsPause || running || !worker.can_resume;
   $("stopRun").disabled = !running;
   state.lastRunning = running;
 }
@@ -198,6 +409,8 @@ function statusLabel(status) {
   if (status === "done_with_errors") return "完成，有失败";
   if (status === "error") return "错误";
   if (status === "failed") return "失败";
+  if (status === "pausing") return "正在暂停";
+  if (status === "paused") return "已暂停";
   if (status === "stopped") return "已停止";
   if (status === "unknown") return "异常结束";
   if (status === "success") return "成功";
@@ -536,14 +749,15 @@ function creatorTemplate(creator = {}) {
     ? creator.tags.split(",").map((item) => item.trim()).filter(Boolean)
     : creator.tags;
   const tags = Array.isArray(rawTags) && rawTags.length ? rawTags : defaultTagsForPlatform(platform);
+  const transcriptMode = normalizeTranscriptMode(creator.transcript_mode);
   const row = document.createElement("details");
   row.className = "creator-row";
-  row.open = !creator.name || !creator.url || creator.enabled === false;
+  row.open = !(creator.name || creator.url);
   row.innerHTML = `
     <summary class="creator-summary">
       <span data-summary="platform" class="platform-pill ${escapeHtml(platform)}">${escapeHtml(meta.label)}</span>
       <span data-summary="name">${escapeHtml(creator.name || "未命名来源")}</span>
-      <span data-summary="meta">${escapeHtml(creator.category || "未分类")} · ${escapeHtml(creator.language || "中文")} · ${escapeHtml(creator.content_type || "口播")}</span>
+      <span data-summary="meta">${escapeHtml(creator.category || "未分类")} · ${escapeHtml(creator.language || "中文")} · ${escapeHtml(creator.content_type || "口播")} · ${escapeHtml(transcriptModeMeta(transcriptMode).shortLabel)}</span>
       <span data-summary="capability" class="badge ${meta.runnable ? "ok" : "warn"}">${meta.runnable ? "可抓取" : "待接入"}</span>
       <span data-summary="status" class="badge ${creator.enabled === false ? "" : "ok"}">${creator.enabled === false ? "停用" : "启用"}</span>
     </summary>
@@ -571,8 +785,15 @@ function creatorTemplate(creator = {}) {
     <label>分类<input data-field="category" value="${escapeHtml(creator.category || "")}" placeholder="自动识别"></label>
     <label>语言<input data-field="language" value="${escapeHtml(creator.language || "")}" placeholder="中文"></label>
     <label>内容类型<input data-field="content_type" value="${escapeHtml(creator.content_type || "")}" placeholder="口播"></label>
+    <label>转录方式
+      <select data-field="transcript_mode">
+        ${Object.entries(TRANSCRIPT_MODE_META).map(([key, item]) => `<option value="${key}" ${key === transcriptMode ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+      </select>
+      <span class="field-help" data-role="transcript-help">${escapeHtml(transcriptModeMeta(transcriptMode).description)}</span>
+    </label>
     <label>Cookie<input data-field="cookie_profile" value="${escapeHtml(creator.cookie_profile || "")}" placeholder="默认"></label>
     <label class="check"><input data-field="enabled" type="checkbox" ${creator.enabled !== false ? "checked" : ""}><span>启用</span></label>
+    <label class="check"><input data-field="filter_promotions" type="checkbox" ${creator.filter_promotions === false ? "" : "checked"}><span>过滤推广内容</span></label>
     <label>标签<input data-field="tags" value="${escapeHtml(tags.join(", "))}"></label>
     <button type="button" class="secondary" data-action="resolve">URL 补全</button>
     <button type="button" class="secondary" data-action="remove">删除</button>
@@ -601,6 +822,7 @@ function outputSubdirInputs() {
   return {
     douyin: $("outputSubdirDouyin"),
     weibo: $("outputSubdirWeibo"),
+    x: $("outputSubdirX"),
     xiaoyuzhou: $("outputSubdirXiaoyuzhou"),
     wechat: $("outputSubdirWechat"),
     xiaohongshu: $("outputSubdirXiaohongshu"),
@@ -620,6 +842,7 @@ function renderConfig(config) {
   const outputInputs = outputSubdirInputs();
   outputInputs.douyin.value = outputSubdirs.douyin || config.output_subdir || "Douyin/口播博主";
   outputInputs.weibo.value = outputSubdirs.weibo || "Weibo/内容源";
+  outputInputs.x.value = outputSubdirs.x || "X/内容源";
   outputInputs.xiaoyuzhou.value = outputSubdirs.xiaoyuzhou || "Podcast/小宇宙";
   outputInputs.wechat.value = outputSubdirs.wechat || "WeChat/公众号";
   outputInputs.xiaohongshu.value = outputSubdirs.xiaohongshu || "Xiaohongshu/内容源";
@@ -635,6 +858,8 @@ function renderConfig(config) {
   $("saveTranscriptTxt").checked = Boolean(retention.save_transcript_txt);
   $("saveSourceRaw").checked = Boolean(retention.save_source_raw);
   $("includeTranscriptInMarkdown").checked = retention.include_transcript_in_markdown !== false;
+  const contentFilter = config.content_filter || {};
+  $("filterPromotions").checked = contentFilter.filter_promotions !== false && contentFilter.enabled !== false;
   const list = $("creatorList");
   list.innerHTML = "";
   for (const creator of config.creators || []) {
@@ -659,12 +884,17 @@ function updateCreatorSummary(row) {
   const category = row.querySelector('[data-field="category"]').value.trim() || "未分类";
   const language = row.querySelector('[data-field="language"]').value.trim() || "中文";
   const contentType = row.querySelector('[data-field="content_type"]').value.trim() || "口播";
+  const transcriptMode = normalizeTranscriptMode(row.querySelector('[data-field="transcript_mode"]')?.value);
   const enabled = row.querySelector('[data-field="enabled"]').checked;
   const platformEl = row.querySelector('[data-summary="platform"]');
   platformEl.textContent = meta.label;
   platformEl.className = `platform-pill ${platform}`;
   row.querySelector('[data-summary="name"]').textContent = name;
-  row.querySelector('[data-summary="meta"]').textContent = `${category} · ${language} · ${contentType}`;
+  row.querySelector('[data-summary="meta"]').textContent = `${category} · ${language} · ${contentType} · ${transcriptModeMeta(transcriptMode).shortLabel}`;
+  const transcriptHelp = row.querySelector('[data-role="transcript-help"]');
+  if (transcriptHelp) {
+    transcriptHelp.textContent = transcriptModeMeta(transcriptMode).description;
+  }
   const capability = row.querySelector('[data-summary="capability"]');
   capability.textContent = meta.runnable ? "可抓取" : "待接入";
   capability.className = `badge ${meta.runnable ? "ok" : "warn"}`;
@@ -683,6 +913,8 @@ function creatorSearchText(row) {
     row.querySelector('[data-field="category"]').value,
     row.querySelector('[data-field="language"]').value,
     row.querySelector('[data-field="content_type"]').value,
+    row.querySelector('[data-field="transcript_mode"]')?.value,
+    transcriptModeMeta(row.querySelector('[data-field="transcript_mode"]')?.value).label,
     row.querySelector('[data-field="cookie_profile"]').value,
     row.querySelector('[data-field="tags"]').value,
   ].join(" ").toLowerCase();
@@ -693,18 +925,34 @@ function applyCreatorFilter() {
   const query = input ? input.value.trim().toLowerCase() : "";
   const platformFilter = $("platformFilter")?.value || "all";
   const rows = Array.from(document.querySelectorAll(".creator-row"));
-  let visible = 0;
+  const matchedRows = [];
   for (const row of rows) {
     const platform = normalizePlatform(row.querySelector('[data-field="platform"]').value, row.querySelector('[data-field="url"]').value);
     const matchedPlatform = platformFilter === "all" || platform === platformFilter;
     const matchedText = !query || creatorSearchText(row).includes(query);
     const matched = matchedPlatform && matchedText;
-    row.hidden = !matched;
-    if (matched) visible += 1;
+    if (matched) matchedRows.push(row);
+    row.hidden = true;
   }
+  const pageSize = state.creatorPageSize;
+  const totalPages = Math.max(1, Math.ceil(matchedRows.length / pageSize));
+  state.creatorPage = Math.max(1, Math.min(state.creatorPage || 1, totalPages));
+  const start = (state.creatorPage - 1) * pageSize;
+  const end = start + pageSize;
+  matchedRows.slice(start, end).forEach((row) => {
+    row.hidden = false;
+  });
   const enabled = rows.filter((row) => row.querySelector('[data-field="enabled"]').checked).length;
   const runnable = rows.filter((row) => row.querySelector('[data-field="enabled"]').checked && isRunnablePlatform(row.querySelector('[data-field="platform"]').value)).length;
-  $("creatorCount").textContent = `${visible}/${rows.length} 个来源 · 启用 ${enabled} · 可抓取 ${runnable}`;
+  $("creatorCount").textContent = `${matchedRows.length}/${rows.length} 个来源 · 启用 ${enabled} · 可抓取 ${runnable}`;
+  const pager = $("creatorPager");
+  if (pager) {
+    pager.innerHTML = `
+      <span>第 ${state.creatorPage}/${totalPages} 页 · 每页 ${pageSize} 个</span>
+      <button type="button" class="secondary small" data-action="creator-prev" ${state.creatorPage <= 1 ? "disabled" : ""}>上一页</button>
+      <button type="button" class="secondary small" data-action="creator-next" ${state.creatorPage >= totalPages ? "disabled" : ""}>下一页</button>
+    `;
+  }
 }
 
 function readCreators() {
@@ -734,8 +982,10 @@ function readCreators() {
       category: row.querySelector('[data-field="category"]').value.trim(),
       language: row.querySelector('[data-field="language"]').value.trim(),
       content_type: row.querySelector('[data-field="content_type"]').value.trim(),
+      transcript_mode: normalizeTranscriptMode(row.querySelector('[data-field="transcript_mode"]')?.value),
       cookie_profile: row.querySelector('[data-field="cookie_profile"]').value.trim(),
       enabled: row.querySelector('[data-field="enabled"]').checked,
+      filter_promotions: row.querySelector('[data-field="filter_promotions"]')?.checked !== false,
       tags: tags.length ? tags : defaultTagsForPlatform(platform),
     };
   });
@@ -751,6 +1001,8 @@ function creatorRunSearchText(creator) {
     creator.category,
     creator.language,
     creator.content_type,
+    creator.transcript_mode,
+    transcriptModeMeta(creator.transcript_mode).label,
     creator.cookie_profile,
     ...(creator.tags || []),
   ].join(" ").toLowerCase();
@@ -835,7 +1087,7 @@ async function resolveCreator(row) {
   if (!query) {
     throw new Error(platform === "wechat" ? "请先在名称栏填写公众号名称" : "请先填写主页 URL");
   }
-  if (!["douyin", "weibo", "xiaoyuzhou", "wechat", "xiaohongshu"].includes(platform)) {
+  if (!["douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"].includes(platform)) {
     throw new Error(`${platformLabel(platform)} URL 补全和抓取适配器下一阶段接入。现在可以先手动保存为内容源。`);
   }
   const button = row.querySelector('[data-action="resolve"]');
@@ -865,6 +1117,7 @@ async function resolveCreator(row) {
     row.querySelector('[data-field="category"]').value = result.creator.category || "";
     row.querySelector('[data-field="language"]').value = result.creator.language || "";
     row.querySelector('[data-field="content_type"]').value = result.creator.content_type || "";
+    row.querySelector('[data-field="transcript_mode"]').value = normalizeTranscriptMode(result.creator.transcript_mode);
     row.querySelector('[data-field="enabled"]').checked = result.creator.enabled !== false;
     row.querySelector('[data-field="cookie_profile"]').value = result.creator.cookie_profile || "";
     row.querySelector('[data-field="tags"]').value = (result.creator.tags || defaultTagsForPlatform(platform)).join(", ");
@@ -899,6 +1152,7 @@ async function saveConfig(includeCreators) {
     output_subdirs: {
       douyin: outputInputs.douyin.value.trim(),
       weibo: outputInputs.weibo.value.trim(),
+      x: outputInputs.x.value.trim(),
       xiaoyuzhou: outputInputs.xiaoyuzhou.value.trim(),
       wechat: outputInputs.wechat.value.trim(),
       xiaohongshu: outputInputs.xiaohongshu.value.trim(),
@@ -916,6 +1170,11 @@ async function saveConfig(includeCreators) {
       save_source_raw: $("saveSourceRaw").checked,
       include_transcript_in_markdown: $("includeTranscriptInMarkdown").checked,
     },
+    content_filter: {
+      enabled: $("filterPromotions").checked,
+      filter_promotions: $("filterPromotions").checked,
+      min_score: 6,
+    },
   };
   payload.output_subdir = payload.output_subdirs.douyin;
   if (includeCreators) payload.creators = readCreators();
@@ -931,7 +1190,7 @@ async function saveSecrets() {
   const payload = {
     douyin_cookie: $("cookieInput").value.trim(),
     weibo_cookie: $("weiboCookieInput").value.trim(),
-    deepseek_api_key: $("apiKeyInput").value.trim(),
+    api_key: $("apiKeyInput").value.trim(),
   };
   const result = await api("/api/secrets", {
     method: "POST",
@@ -941,7 +1200,26 @@ async function saveSecrets() {
   $("weiboCookieInput").value = "";
   $("apiKeyInput").value = "";
   renderStatus(result.status);
-  toast("密钥已保存");
+  toast("密钥已保存；微博/公众号会自动验证登录态");
+}
+
+async function verifyAuth(platform) {
+  const buttons = [$("verifyWeiboAuth"), $("verifyWechatAuth")].filter(Boolean);
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    const result = await api("/api/auth/verify", {
+      method: "POST",
+      body: JSON.stringify({ platform }),
+    });
+    renderStatus(result.status);
+    toast(authVerifySummary(result.results) || "登录态验证完成");
+  } finally {
+    buttons.forEach((button) => {
+      button.disabled = false;
+    });
+  }
 }
 
 async function startBrowserLogin(platform) {
@@ -1030,7 +1308,7 @@ async function startSavedCandidateRun(cache, creatorLabel) {
   if (!runId) return false;
   const videoIds = await allCandidateIdsForRun(runId);
   if (!videoIds.length) return false;
-  const confirmed = window.confirm(`已找到 ${creatorLabel} 上次保存的候选内容 ${videoIds.length} 条。本次会直接抓取这些候选，不重新全量嗅探。继续吗？`);
+  const confirmed = window.confirm(`已找到 ${creatorLabel} 上次保存的候选内容 ${videoIds.length} 条。本次会按全量回溯模式读取来源，并只处理这些候选，避免普通模式只取前 50 条。继续吗？`);
   if (!confirmed) return true;
   const result = await api("/api/run/selected", {
     method: "POST",
@@ -1039,6 +1317,7 @@ async function startSavedCandidateRun(cache, creatorLabel) {
       video_ids: videoIds,
       force: $("forceRun").checked,
       skip_summary: !$("aiSummaryRun").checked,
+      full_history: true,
     }),
   });
   renderLogs(result.worker);
@@ -1072,6 +1351,20 @@ async function stopRun() {
   await refreshStatus();
 }
 
+async function pauseRun() {
+  const result = await api("/api/run/pause", { method: "POST", body: "{}" });
+  renderLogs(result.worker);
+  toast("已请求暂停；当前内容处理完后会停下来");
+  await refreshStatus();
+}
+
+async function resumeRun() {
+  const result = await api("/api/run/resume", { method: "POST", body: "{}" });
+  renderLogs(result.worker);
+  toast("已继续上次暂停的任务");
+  await refreshStatus();
+}
+
 async function retryFailedRun(runId) {
   if (!runId) {
     throw new Error("缺少运行编号，无法重爬失败项");
@@ -1085,6 +1378,24 @@ async function retryFailedRun(runId) {
   renderLogs(result.worker);
   const retry = result.worker.retry;
   toast(`已启动失败重爬：${retry?.video_count || 0} 条`);
+  await refreshStatus();
+}
+
+async function retryHealthFailures(scope = "all", platform = "") {
+  const label = platform ? `只重爬${platformLabel(platform)}失败项` : "重爬自检失败项";
+  const confirmed = window.confirm(`${label}。来源失败会重新嗅探该来源，具体内容失败会按内容 ID 重爬。继续吗？`);
+  if (!confirmed) return;
+  const result = await api("/api/health/retry", {
+    method: "POST",
+    body: JSON.stringify({
+      scope,
+      platform,
+      skip_summary: !$("aiSummaryRun").checked,
+    }),
+  });
+  renderLogs(result.worker);
+  const retry = result.worker.health_retry || {};
+  toast(`已启动自检重爬：来源 ${retry.source_creator_count || 0} 个，内容 ${retry.exact_item_count || 0} 条`);
   await refreshStatus();
 }
 
@@ -1152,6 +1463,7 @@ $("addCreator").addEventListener("click", () => {
     category: "",
     language: "",
     content_type: "",
+    transcript_mode: "auto",
     bio: "",
     enabled: true,
     tags: defaultTagsForPlatform("douyin"),
@@ -1166,8 +1478,12 @@ $("saveSecrets").addEventListener("click", () => saveSecrets().catch((error) => 
 $("douyinQrLogin").addEventListener("click", () => startBrowserLogin("douyin").catch((error) => toast(error.message)));
 $("xiaohongshuQrLogin").addEventListener("click", () => startBrowserLogin("xiaohongshu").catch((error) => toast(error.message)));
 $("refresh").addEventListener("click", () => refreshStatus().catch((error) => toast(error.message)));
+$("verifyWeiboAuth").addEventListener("click", () => verifyAuth("weibo").catch((error) => toast(error.message)));
+$("verifyWechatAuth").addEventListener("click", () => verifyAuth("wechat").catch((error) => toast(error.message)));
 $("scanCandidates").addEventListener("click", () => scanCandidateItems().catch((error) => toast(error.message)));
 $("crawlCreatorAll").addEventListener("click", () => crawlSelectedCreatorAll().catch((error) => toast(error.message)));
+$("pauseRun").addEventListener("click", () => pauseRun().catch((error) => toast(error.message)));
+$("resumeRun").addEventListener("click", () => resumeRun().catch((error) => toast(error.message)));
 $("stopRun").addEventListener("click", () => stopRun().catch((error) => toast(error.message)));
 $("openOutput").addEventListener("click", () => openTarget("output").catch((error) => toast(error.message)));
 $("creatorList").addEventListener("input", () => {
@@ -1178,9 +1494,31 @@ $("creatorList").addEventListener("change", () => {
   renderCreatorSelect();
   applyCreatorFilter();
 });
-$("creatorSearch").addEventListener("input", applyCreatorFilter);
-$("platformFilter").addEventListener("change", applyCreatorFilter);
+$("creatorSearch").addEventListener("input", () => {
+  state.creatorPage = 1;
+  applyCreatorFilter();
+});
+$("platformFilter").addEventListener("change", () => {
+  state.creatorPage = 1;
+  applyCreatorFilter();
+});
+$("creatorPager").addEventListener("click", (event) => {
+  const button = event.target && event.target.closest ? event.target.closest("[data-action]") : null;
+  if (!button) return;
+  if (button.dataset.action === "creator-prev") {
+    state.creatorPage = Math.max(1, state.creatorPage - 1);
+    applyCreatorFilter();
+  } else if (button.dataset.action === "creator-next") {
+    state.creatorPage += 1;
+    applyCreatorFilter();
+  }
+});
 $("runCreatorSearch").addEventListener("input", renderCreatorSelect);
+$("healthBox").addEventListener("click", (event) => {
+  const button = event.target && event.target.closest ? event.target.closest("[data-action]") : null;
+  if (!button || button.dataset.action !== "health-retry") return;
+  retryHealthFailures(button.dataset.scope || "all", button.dataset.platform || "").catch((error) => toast(error.message));
+});
 $("historyList").addEventListener("change", (event) => {
   const target = event.target;
   if (target && target.matches && target.matches('[data-role="candidate"]')) {

@@ -2,3 +2,6 @@ faster-whisper>=1.1,<2
 pypinyin>=0.51,<1
 pywebview>=5.3,<6
 playwright>=1.44,<2
+rapidocr-onnxruntime>=1.4,<2
+opencv-python-headless>=4.9,<5
+Pillow>=10,<12

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Generate a weekly Obsidian brief from processed Douyin notes and optionally ask
-Hermes to send a compact version to Telegram.
+Generate Obsidian briefs from processed notes and optionally ask Hermes to send
+a compact version to Telegram.
 """
 
 from __future__ import annotations
@@ -16,16 +16,35 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml"
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+REPORT_META = {
+    "weekly": {
+        "label": "周报",
+        "period_label": "本周",
+        "title_prefix": "关注来源周报",
+        "default_days": 7,
+        "default_subdir": "Douyin/周报",
+    },
+    "daily": {
+        "label": "日报",
+        "period_label": "今日",
+        "title_prefix": "关注来源日报",
+        "default_days": 1,
+        "default_subdir": "Douyin/日报",
+    },
+}
 
 
 @dataclass
 class ProcessedVideo:
+    source: str
     video_id: str
     creator_key: str
     creator_name: str
@@ -51,10 +70,11 @@ def load_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
-def default_report_range(now: Optional[datetime] = None) -> tuple[datetime, datetime]:
+def default_report_range(period: str = "weekly", now: Optional[datetime] = None, days: Optional[int] = None) -> tuple[datetime, datetime]:
     now = now or datetime.now(timezone.utc)
     end = now.replace(microsecond=0)
-    start = end - timedelta(days=7)
+    default_days = int(REPORT_META.get(period, REPORT_META["weekly"])["default_days"])
+    start = end - timedelta(days=days or default_days)
     return start, end
 
 
@@ -107,6 +127,58 @@ def bullets(text: str, limit: int = 5) -> List[str]:
     return items[:limit]
 
 
+def first_section(text: str, headings: List[str]) -> str:
+    for heading in headings:
+        value = section(text, heading)
+        if value:
+            return value
+    return ""
+
+
+def source_label(source: str) -> str:
+    labels = {
+        "douyin": "抖音",
+        "weibo": "微博",
+        "x": "X",
+        "xiaoyuzhou": "小宇宙",
+        "wechat": "公众号",
+        "xiaohongshu": "小红书",
+        "youtube": "YouTube",
+        "bilibili": "Bilibili",
+        "tiktok": "TikTok",
+        "kuaishou": "快手",
+        "tieba": "贴吧",
+        "zhihu": "知乎",
+    }
+    return labels.get(source, source or "未知平台")
+
+
+def creator_heading(video: ProcessedVideo) -> str:
+    return f"{source_label(video.source)} · {video.creator_name}"
+
+
+def report_config(config: Dict[str, Any], period: str) -> Dict[str, Any]:
+    weekly = config.get("weekly_report") if isinstance(config.get("weekly_report"), dict) else {}
+    current = config.get(f"{period}_report") if isinstance(config.get(f"{period}_report"), dict) else {}
+    merged = dict(weekly)
+    for key, value in current.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = dict(merged[key])
+            nested.update(value)
+            merged[key] = nested
+        else:
+            merged[key] = value
+    return merged
+
+
+def range_label(since: datetime, until: datetime, period: str) -> str:
+    if period == "daily":
+        return str(until.astimezone(LOCAL_TZ).date())
+    start = since.astimezone(LOCAL_TZ).date()
+    end = (until - timedelta(seconds=1)).astimezone(LOCAL_TZ).date()
+    return f"{start} - {end}"
+
+
 def load_processed_videos(config: Dict[str, Any], since: datetime, until: datetime) -> List[ProcessedVideo]:
     state_path = project_path(str(config.get("state_db", "local_tools/obsidian_sync/state.sqlite")))
     if not state_path.exists():
@@ -133,8 +205,11 @@ def load_processed_videos(config: Dict[str, Any], since: datetime, until: dateti
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
         fm = parse_frontmatter(text)
+        summary_text = first_section(text, ["摘要", "内容摘要", "总结"])
+        point_text = first_section(text, ["核心观点", "要点", "主要内容"])
         videos.append(
             ProcessedVideo(
+                source=fm.get("source", ""),
                 video_id=str(row[0]),
                 creator_key=str(row[1]),
                 creator_name=str(row[2]),
@@ -143,8 +218,8 @@ def load_processed_videos(config: Dict[str, Any], since: datetime, until: dateti
                 markdown_path=path,
                 processed_at=str(row[6] or ""),
                 published_at=fm.get("published_at", ""),
-                summary=first_paragraph(section(text, "摘要")),
-                points=bullets(section(text, "核心观点")),
+                summary=first_paragraph(summary_text),
+                points=bullets(point_text),
                 keywords=section(text, "关键词").replace("\n", " ").strip(),
             )
         )
@@ -154,33 +229,36 @@ def load_processed_videos(config: Dict[str, Any], since: datetime, until: dateti
 def group_by_creator(videos: List[ProcessedVideo]) -> Dict[str, List[ProcessedVideo]]:
     grouped: Dict[str, List[ProcessedVideo]] = {}
     for video in videos:
-        grouped.setdefault(video.creator_name, []).append(video)
+        grouped.setdefault(creator_heading(video), []).append(video)
     return grouped
 
 
-def build_markdown(videos: List[ProcessedVideo], since: datetime, until: datetime) -> str:
-    title = f"抖音口播博主周报 {since.date()} - {(until - timedelta(days=1)).date()}"
+def build_markdown(videos: List[ProcessedVideo], since: datetime, until: datetime, period: str = "weekly") -> str:
+    meta = REPORT_META.get(period, REPORT_META["weekly"])
+    label = str(meta["label"])
+    period_label = str(meta["period_label"])
+    title = f"{meta['title_prefix']} {range_label(since, until, period)}"
     grouped = group_by_creator(videos)
     total = len(videos)
     lines = [
         "---",
-        "source: douyin",
-        f"report_type: weekly",
-        f"week_start: {since.date()}",
-        f"week_end: {(until - timedelta(days=1)).date()}",
+        "source: local_content_sync",
+        f"report_type: {period}",
+        f"range_start: {since.isoformat(timespec='seconds')}",
+        f"range_end: {until.isoformat(timespec='seconds')}",
         f"generated_at: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "tags:",
-        "  - douyin",
-        "  - 周报",
+        "  - 内容同步",
+        f"  - {label}",
         "---",
         "",
         f"# {title}",
         "",
-        f"本周新增处理视频：{total} 条。",
+        f"{period_label}新增处理内容：{total} 条。",
         "",
     ]
     if not videos:
-        lines.append("本周没有新的已处理视频。")
+        lines.append(f"{period_label}没有新的已处理内容。")
         return "\n".join(lines).rstrip() + "\n"
 
     lines.extend(["## 速览", ""])
@@ -194,8 +272,9 @@ def build_markdown(videos: List[ProcessedVideo], since: datetime, until: datetim
             lines.extend([
                 f"### {idx}. {video.title}",
                 "",
+                f"- 平台：{source_label(video.source)}",
                 f"- 发布日期：{video.published_at or '未知'}",
-                f"- 原视频：{video.source_url}",
+                f"- 原文：{video.source_url}",
                 f"- 笔记：[[{video.markdown_path.stem}]]",
                 f"- 摘要：{video.summary or '无摘要'}",
             ])
@@ -213,19 +292,23 @@ def build_telegram_text(
     videos: List[ProcessedVideo],
     since: datetime,
     until: datetime,
+    period: str = "weekly",
     config: Optional[Dict[str, Any]] = None,
 ) -> str:
-    report_cfg = (config or {}).get("weekly_report", {})
+    meta = REPORT_META.get(period, REPORT_META["weekly"])
+    label = str(meta["label"])
+    period_label = str(meta["period_label"])
+    report_cfg = report_config(config or {}, period)
     telegram_cfg = report_cfg.get("telegram") if isinstance(report_cfg.get("telegram"), dict) else {}
     max_creators = int(telegram_cfg.get("max_creators", 8))
     max_items_per_creator = int(telegram_cfg.get("max_items_per_creator", 3))
     title_chars = int(telegram_cfg.get("title_chars", 72))
     summary_chars = int(telegram_cfg.get("summary_chars", 80))
     max_chars = int(telegram_cfg.get("max_chars", 3500))
-    header = f"抖音口播博主周报 {since.date()} - {(until - timedelta(days=1)).date()}"
+    header = f"{meta['title_prefix']} {range_label(since, until, period)}"
     if not videos:
-        return f"{header}\n\n本周没有新的已处理视频。"
-    lines = [header, "", f"本周新增 {len(videos)} 条。"]
+        return f"{header}\n\n{period_label}没有新的已处理内容。"
+    lines = [header, "", f"{period_label}新增 {len(videos)} 条。"]
     grouped = sorted(group_by_creator(videos).items(), key=lambda item: len(item[1]), reverse=True)
     for creator, items in grouped[:max_creators]:
         lines.extend(["", f"{creator}：{len(items)} 条"])
@@ -235,33 +318,38 @@ def build_telegram_text(
             if summary:
                 lines.append(f"   {truncate_text(summary, summary_chars)}")
         if len(items) > max_items_per_creator:
-            lines.append(f"   另有 {len(items) - max_items_per_creator} 条见 Obsidian 完整周报。")
+            lines.append(f"   另有 {len(items) - max_items_per_creator} 条见 Obsidian 完整{label}。")
     if len(grouped) > max_creators:
-        lines.extend(["", f"另有 {len(grouped) - max_creators} 个来源见 Obsidian 完整周报。"])
+        lines.extend(["", f"另有 {len(grouped) - max_creators} 个来源见 Obsidian 完整{label}。"])
     text = "\n".join(lines)
     return truncate_text(text, max_chars)
 
 
-def write_report(config: Dict[str, Any], markdown: str, since: datetime, until: datetime) -> Path:
+def write_report(config: Dict[str, Any], markdown: str, since: datetime, until: datetime, period: str = "weekly") -> Path:
+    meta = REPORT_META.get(period, REPORT_META["weekly"])
+    report_cfg = report_config(config, period)
     vault = Path(str(config["vault_path"])).expanduser()
-    base = vault / str(config.get("weekly_report", {}).get("output_subdir", "Douyin/周报"))
+    base = vault / str(report_cfg.get("output_subdir", meta["default_subdir"]))
     base.mkdir(parents=True, exist_ok=True)
-    path = base / f"抖音口播博主周报-{since.date()}-{(until - timedelta(days=1)).date()}.md"
+    safe_label = range_label(since, until, period).replace(" ", "")
+    path = base / f"{meta['title_prefix']}-{safe_label}.md"
     path.write_text(markdown, encoding="utf-8")
     return path
 
 
-def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dry_run: bool) -> int:
-    report_cfg = config.get("weekly_report", {})
+def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dry_run: bool, period: str = "weekly") -> int:
+    meta = REPORT_META.get(period, REPORT_META["weekly"])
+    label = str(meta["label"])
+    report_cfg = report_config(config, period)
     hermes_cfg = report_cfg.get("hermes", {})
     if not hermes_cfg.get("enabled", True):
         print("HERMES disabled")
         return 0
     bot_username = str(hermes_cfg.get("bot_username") or "@Steven_Secretary_bot").strip()
     prompt = (
-        f"请通过 Telegram 机器人 {bot_username} 把下面这份周报精简内容发送给我。"
+        f"请通过 Telegram 机器人 {bot_username} 把下面这份{label}精简内容发送给我。"
         "只发送正文，不需要解释。"
-        f"\n\n完整周报本地路径：{report_path}\n\n{message}"
+        f"\n\n完整{label}本地路径：{report_path}\n\n{message}"
     )
     if dry_run:
         print("HERMES DRY RUN")
@@ -304,9 +392,11 @@ def send_with_hermes(message: str, report_path: Path, config: Dict[str, Any], dr
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate weekly Douyin brief and optionally send with Hermes.")
+    parser = argparse.ArgumentParser(description="Generate local content briefs and optionally send with Hermes.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
-    parser.add_argument("--since", default=None, help="Inclusive date/datetime. Defaults to 7 days ago.")
+    parser.add_argument("--period", choices=sorted(REPORT_META), default="weekly")
+    parser.add_argument("--days", type=int, default=None, help="Default lookback window when --since is omitted.")
+    parser.add_argument("--since", default=None, help="Inclusive date/datetime. Defaults to the period lookback.")
     parser.add_argument("--until", default=None, help="Exclusive date/datetime. Defaults to now.")
     parser.add_argument("--no-hermes", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -325,17 +415,17 @@ def parse_date(value: Optional[str], fallback: datetime) -> datetime:
 def main() -> int:
     args = parse_args()
     config = load_yaml(project_path(args.config))
-    default_since, default_until = default_report_range()
+    default_since, default_until = default_report_range(args.period, days=args.days)
     since = parse_date(args.since, default_since)
     until = parse_date(args.until, default_until)
     videos = load_processed_videos(config, since, until)
-    markdown = build_markdown(videos, since, until)
-    report_path = write_report(config, markdown, since, until)
-    print(f"WEEKLY_REPORT {report_path}")
-    print(f"WEEKLY_VIDEOS {len(videos)}")
+    markdown = build_markdown(videos, since, until, args.period)
+    report_path = write_report(config, markdown, since, until, args.period)
+    print(f"{args.period.upper()}_REPORT {report_path}")
+    print(f"{args.period.upper()}_ITEMS {len(videos)}")
     if not args.no_hermes:
-        text = build_telegram_text(videos, since, until, config)
-        return send_with_hermes(text, report_path, config, args.dry_run)
+        text = build_telegram_text(videos, since, until, args.period, config)
+        return send_with_hermes(text, report_path, config, args.dry_run, args.period)
     return 0
 
 

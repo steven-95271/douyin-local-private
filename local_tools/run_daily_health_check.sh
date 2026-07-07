@@ -10,12 +10,12 @@ fi
 
 log_dir="$HOME/Library/Logs/douyin-local-private"
 mkdir -p "$log_dir" local_tools/obsidian_sync/work/logs
-log_file="$log_dir/content_sync.log"
+log_file="$log_dir/daily_health_check.log"
 config_file="local_tools/obsidian_sync/creators.yaml"
 
 {
   echo
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC START"
-  .venv/bin/python local_tools/obsidian_sync/sync.py --config "$config_file"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] CONTENT SYNC DONE"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DAILY HEALTH CHECK START"
+  .venv/bin/python local_tools/obsidian_sync/daily_health_check.py --config "$config_file"
+  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DAILY HEALTH CHECK DONE"
 } >> "$log_file" 2>&1

@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,7 @@ DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml
 KNOWN_PLATFORMS = {
     "douyin",
     "weibo",
+    "x",
     "xiaoyuzhou",
     "wechat",
     "xiaohongshu",
@@ -49,6 +51,7 @@ KNOWN_PLATFORMS = {
 PLATFORM_ORDER = [
     "douyin",
     "weibo",
+    "x",
     "xiaoyuzhou",
     "wechat",
     "xiaohongshu",
@@ -59,14 +62,18 @@ PLATFORM_ORDER = [
     "tieba",
     "zhihu",
 ]
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "xiaoyuzhou", "wechat", "xiaohongshu"}
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"}
+TRANSCRIPT_MODES = {"auto", "audio", "subtitle_ocr", "subtitle_ocr_fallback_audio"}
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from local_tools.obsidian_sync.platform_health import collect_platform_health  # noqa: E402
 
 settings: Optional[argparse.Namespace] = None
 worker_process: Optional[subprocess.Popen] = None
 worker_log: Optional[Path] = None
 worker_run_id: Optional[str] = None
+worker_pause_file: Optional[Path] = None
 browser_login_processes: Dict[str, subprocess.Popen] = {}
 
 
@@ -270,6 +277,8 @@ def infer_platform_from_url(url: str) -> str:
         return "xiaoyuzhou"
     if "weibo.com" in text or "weibo.cn" in text:
         return "weibo"
+    if "x.com" in text or "twitter.com" in text:
+        return "x"
     if "kuaishou.com" in text or "gifshow.com" in text:
         return "kuaishou"
     if "tieba.baidu.com" in text:
@@ -296,6 +305,7 @@ def default_tags_for_platform(platform: str) -> list[str]:
     defaults = {
         "douyin": ["douyin", "口播"],
         "weibo": ["weibo", "文字"],
+        "x": ["x", "推文"],
         "xiaoyuzhou": ["xiaoyuzhou", "播客"],
         "wechat": ["wechat", "公众号"],
         "xiaohongshu": ["xiaohongshu", "图文"],
@@ -313,6 +323,7 @@ def platform_label(platform: str) -> str:
     labels = {
         "douyin": "抖音",
         "weibo": "微博",
+        "x": "X",
         "xiaoyuzhou": "小宇宙",
         "wechat": "公众号",
         "xiaohongshu": "小红书",
@@ -333,6 +344,7 @@ def default_output_subdirs(data: Optional[Dict[str, Any]] = None) -> Dict[str, s
     return {
         "douyin": legacy_douyin or "Douyin/口播博主",
         "weibo": "Weibo/内容源",
+        "x": "X/内容源",
         "xiaoyuzhou": "Podcast/小宇宙",
         "wechat": "WeChat/公众号",
         "xiaohongshu": "Xiaohongshu/内容源",
@@ -374,6 +386,26 @@ def retention_config(data: Dict[str, Any]) -> Dict[str, bool]:
         for key in defaults:
             if key in raw:
                 defaults[key] = bool(raw.get(key))
+    return defaults
+
+
+def content_filter_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "enabled": True,
+        "filter_promotions": True,
+        "min_score": 6,
+    }
+    raw = data.get("content_filter")
+    if isinstance(raw, dict):
+        for key in defaults:
+            if key in raw:
+                defaults[key] = raw.get(key)
+    defaults["enabled"] = bool(defaults.get("enabled"))
+    defaults["filter_promotions"] = bool(defaults.get("filter_promotions"))
+    try:
+        defaults["min_score"] = int(defaults.get("min_score") or 6)
+    except (TypeError, ValueError):
+        defaults["min_score"] = 6
     return defaults
 
 
@@ -1045,6 +1077,256 @@ def request_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, parsed.fragment))
 
 
+X_RESERVED_PATHS = {
+    "home",
+    "explore",
+    "i",
+    "intent",
+    "login",
+    "logout",
+    "messages",
+    "notifications",
+    "search",
+    "settings",
+    "share",
+}
+
+
+def extract_x_username_from_url(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("@"):
+        return re.sub(r"[^A-Za-z0-9_]+", "", text[1:])[:50]
+    if not text.startswith(("http://", "https://")) and re.fullmatch(r"[A-Za-z0-9_]{1,50}", text):
+        return text
+    parsed = urlparse(text if text.startswith(("http://", "https://")) else f"https://{text}")
+    if "x.com" not in parsed.netloc and "twitter.com" not in parsed.netloc:
+        return ""
+    first = parsed.path.strip("/").split("/", 1)[0].strip()
+    if not first or first.lower() in X_RESERVED_PATHS:
+        return ""
+    return re.sub(r"[^A-Za-z0-9_]+", "", first)[:50]
+
+
+def opencli_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    extra_paths = [
+        str(Path.home() / ".npm-global/bin"),
+        str(Path.home() / ".local/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    env["PATH"] = ":".join([*extra_paths, env.get("PATH", "")])
+    return env
+
+
+def find_opencli() -> str:
+    env = opencli_env()
+    for directory in env["PATH"].split(":"):
+        candidate = Path(directory) / "opencli"
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return ""
+
+
+def extract_json_payload(text: str) -> Any:
+    source = str(text or "").strip()
+    for start_char, end_char in (("[", "]"), ("{", "}")):
+        start = source.find(start_char)
+        end = source.rfind(end_char)
+        if start >= 0 and end > start:
+            try:
+                return json.loads(source[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
+def decode_js_string(value: str) -> str:
+    raw = str(value or "")
+    try:
+        decoded = json.loads(f'"{raw}"')
+    except json.JSONDecodeError:
+        decoded = (
+            raw.replace("\\/", "/")
+            .replace('\\"', '"')
+            .replace("\\n", " ")
+            .replace("\\r", " ")
+            .replace("\\t", " ")
+        )
+    return html.unescape(str(decoded)).strip()
+
+
+def clean_x_display_name(value: str, username: str) -> str:
+    cleaned = clean_creator_name(strip_html_text(value))
+    if not cleaned:
+        return ""
+    username = username.strip("@")
+    cleaned = re.sub(
+        rf"\s*\(@{re.escape(username)}\)\s*(?:/ X|on X)?\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s*(?:/ X|on X)\s*$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip() or f"@{username}"
+
+
+def fetch_x_public_html(username: str) -> tuple[str, str]:
+    url = f"https://x.com/{username}"
+    request = Request(
+        request_url(url),
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://x.com/",
+        },
+    )
+    with urlopen(request, timeout=12) as response:
+        return response.geturl(), response.read(6_000_000).decode("utf-8", errors="replace")
+
+
+def extract_x_recent_titles_from_html(html_text: str, limit: int = 8) -> list[str]:
+    source = html.unescape(html_text or "")
+    titles: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r'full_text:"((?:\\.|[^"\\])*)"', source):
+        text = strip_html_text(decode_js_string(match.group(1)))
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text or text in seen:
+            continue
+        if text.lower().startswith(("rt @", "repost @")):
+            continue
+        seen.add(text)
+        titles.append(text[:160])
+        if len(titles) >= limit:
+            break
+    return titles
+
+
+def extract_x_profile_from_html(username: str, html_text: str, final_url: str = "") -> Dict[str, Any]:
+    source = html.unescape(html_text or "")
+    profile: Dict[str, Any] = {
+        "username": username,
+        "name": "",
+        "bio": "",
+        "url": final_url or f"https://x.com/{username}",
+        "recent_titles": extract_x_recent_titles_from_html(source),
+    }
+
+    for pattern in (
+        r'description:"((?:\\.|[^"\\])*)".{0,1800}?name:"((?:\\.|[^"\\])*)".{0,700}?screenName:"([A-Za-z0-9_]{1,50})"',
+        r'description:"((?:\\.|[^"\\])*)".{0,1800}?name:"((?:\\.|[^"\\])*)".{0,700}?screen_name:"([A-Za-z0-9_]{1,50})"',
+    ):
+        for match in re.finditer(pattern, source, flags=re.DOTALL):
+            screen_name = match.group(3).strip()
+            if screen_name.lower() != username.lower():
+                continue
+            profile["username"] = screen_name
+            profile["bio"] = strip_html_text(decode_js_string(match.group(1)))[:500]
+            profile["name"] = clean_x_display_name(decode_js_string(match.group(2)), screen_name)
+            profile["url"] = f"https://x.com/{screen_name}"
+            break
+        if profile.get("name"):
+            break
+
+    if not profile.get("name"):
+        for pattern in (
+            r'__typename:"UserCore",name:"((?:\\.|[^"\\])*)",screen_name:"([A-Za-z0-9_]{1,50})"',
+            r'name:"((?:\\.|[^"\\])*)",screen_name:"([A-Za-z0-9_]{1,50})"',
+        ):
+            match = re.search(pattern, source)
+            if not match:
+                continue
+            screen_name = match.group(2).strip()
+            if screen_name.lower() != username.lower():
+                continue
+            profile["username"] = screen_name
+            profile["name"] = clean_x_display_name(decode_js_string(match.group(1)), screen_name)
+            profile["url"] = f"https://x.com/{screen_name}"
+            break
+
+    if not profile.get("bio"):
+        bio_match = re.search(r'__typename:"UserBio",description:"((?:\\.|[^"\\])*)"', source)
+        if bio_match:
+            profile["bio"] = strip_html_text(decode_js_string(bio_match.group(1)))[:500]
+
+    if not profile.get("name"):
+        title = (
+            extract_meta(source, "twitter:title")
+            or extract_meta(source, "og:title")
+            or extract_meta(source, "title")
+        )
+        if not title:
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", source, flags=re.IGNORECASE | re.DOTALL)
+            title = title_match.group(1) if title_match else ""
+        profile["name"] = clean_x_display_name(title, str(profile.get("username") or username))
+
+    if not profile.get("bio"):
+        description = (
+            extract_meta(source, "twitter:description")
+            or extract_meta(source, "og:description")
+            or extract_meta(source, "description")
+        )
+        profile["bio"] = strip_html_text(description)[:500]
+
+    return profile
+
+
+def fetch_x_creator_profile(url_or_username: str) -> Dict[str, Any]:
+    username = extract_x_username_from_url(url_or_username)
+    if not username:
+        raise ValueError("请输入 X 用户主页 URL，例如 https://x.com/username，或 @username。")
+    profile: Dict[str, Any] = {
+        "username": username,
+        "name": f"@{username}",
+        "bio": "",
+        "url": f"https://x.com/{username}",
+        "recent_titles": [],
+    }
+    try:
+        final_url, html_text = fetch_x_public_html(username)
+        html_profile = extract_x_profile_from_html(username, html_text, final_url)
+        if html_profile.get("name"):
+            profile.update({key: value for key, value in html_profile.items() if value})
+            if profile.get("recent_titles"):
+                return profile
+    except Exception:
+        pass
+
+    opencli = find_opencli()
+    if not opencli:
+        return profile
+    try:
+        result = subprocess.run(
+            [opencli, "twitter", "profile", username, "-f", "json"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            env=opencli_env(),
+            cwd=str(PROJECT_ROOT),
+        )
+    except Exception:
+        return profile
+    if result.returncode != 0:
+        return profile
+    payload = extract_json_payload(result.stdout)
+    records = payload if isinstance(payload, list) else [payload] if isinstance(payload, dict) else []
+    record = next((item for item in records if isinstance(item, dict)), {})
+    name = clean_creator_name(str(record.get("name") or record.get("display_name") or ""))
+    screen_name = extract_x_username_from_url(str(record.get("screen_name") or record.get("username") or username)) or username
+    bio = strip_html_text(str(record.get("bio") or record.get("description") or ""))[:500]
+    if name:
+        profile["name"] = name
+    profile["username"] = screen_name
+    profile["bio"] = bio or str(profile.get("bio") or "")
+    profile["url"] = f"https://x.com/{screen_name}"
+    return profile
+
+
 def add_weibo_error(errors: list[str], message: str) -> None:
     if message not in errors:
         errors.append(message)
@@ -1301,6 +1583,198 @@ async def fetch_douyin_creator_profile(url: str, cookie: str) -> Dict[str, Any]:
     return {"sec_user_id": sec_user_id, "name": name, "bio": bio, "recent_titles": titles}
 
 
+def detect_profile_language(text: str) -> str:
+    return "英文" if re.search(r"\b[a-zA-Z]{4,}\b", text) and not re.search(r"[\u4e00-\u9fff]", text) else "中文"
+
+
+def classify_x_creator_locally(name: str, bio: str, titles: list[str]) -> Dict[str, Any]:
+    profile_text = " ".join([name, bio])
+    titles_text = " ".join(titles)
+    combined = " ".join([profile_text, titles_text])
+
+    def keyword_hit(haystack: str, keyword: str) -> bool:
+        needle = keyword.casefold()
+        if re.fullmatch(r"[a-z0-9_+#.-]+", needle):
+            return bool(re.search(rf"(?<![a-z0-9_]){re.escape(needle)}(?![a-z0-9_])", haystack))
+        return needle in haystack
+
+    rules = [
+        (
+            "AI科技",
+            "AI/科技观点",
+            ["AI科技"],
+            [
+                "ai",
+                "人工智能",
+                "openai",
+                "chatgpt",
+                "llm",
+                "agi",
+                "claude",
+                "gemini",
+                "deep learning",
+                "machine learning",
+                "neural",
+                "transformer",
+                "模型",
+                "agent",
+                "coding",
+                "developer",
+            ],
+        ),
+        (
+            "创业商业",
+            "创业/商业观点",
+            ["创业商业"],
+            [
+                "startup",
+                "founder",
+                "entrepreneur",
+                "business",
+                "venture",
+                "vc",
+                "saas",
+                "mrr",
+                "revenue",
+                "bootstrapped",
+                "indie hacker",
+                "product",
+                "growth",
+                "创业",
+                "公司",
+                "商业",
+                "产品",
+            ],
+        ),
+        (
+            "投资金融",
+            "投资/市场观点",
+            ["投资金融"],
+            [
+                "invest",
+                "investment",
+                "stock",
+                "stocks",
+                "crypto",
+                "bitcoin",
+                "market",
+                "finance",
+                "alpha",
+                "macro",
+                "投资",
+                "股票",
+                "基金",
+                "宏观",
+                "金融",
+            ],
+        ),
+        (
+            "营销增长",
+            "营销/增长观点",
+            ["营销增长"],
+            [
+                "marketing",
+                "seo",
+                "content",
+                "creator",
+                "newsletter",
+                "brand",
+                "ads",
+                "广告",
+                "营销",
+                "增长",
+                "品牌",
+                "内容",
+            ],
+        ),
+        (
+            "技术开发",
+            "技术/开发观点",
+            ["技术开发"],
+            [
+                "programming",
+                "code",
+                "python",
+                "javascript",
+                "typescript",
+                "github",
+                "open source",
+                "software",
+                "engineer",
+                "开发",
+                "编程",
+                "开源",
+                "软件",
+            ],
+        ),
+        (
+            "时事评论",
+            "时事/公共议题",
+            ["时事评论"],
+            [
+                "politics",
+                "policy",
+                "election",
+                "government",
+                "gaza",
+                "israel",
+                "war",
+                "china",
+                "时事",
+                "政治",
+                "战争",
+                "地缘",
+            ],
+        ),
+        (
+            "个人成长",
+            "认知/成长观点",
+            ["个人成长"],
+            [
+                "philosophy",
+                "writing",
+                "essay",
+                "learning",
+                "psychology",
+                "book",
+                "心理",
+                "认知",
+                "成长",
+                "读书",
+                "写作",
+            ],
+        ),
+    ]
+
+    profile_lower = profile_text.casefold()
+    titles_lower = titles_text.casefold()
+    best_category = "综合"
+    best_content_type = "X 推文"
+    best_tags = ["综合"]
+    best_score = 0
+    for category, content_type, tags, keywords in rules:
+        score = 0
+        for keyword in keywords:
+            if keyword_hit(profile_lower, keyword):
+                score += 3
+            if keyword_hit(titles_lower, keyword):
+                score += 1
+        if category == "创业商业" and re.search(r"\$\s*[\d,.]+\s*[kmb]?/m\b", profile_lower):
+            score += 4
+        if score > best_score:
+            best_score = score
+            best_category = category
+            best_content_type = content_type
+            best_tags = tags
+
+    return {
+        "category": best_category,
+        "language": detect_profile_language(combined),
+        "content_type": best_content_type,
+        "tags": ["x", "推文", *best_tags],
+    }
+
+
 def fallback_creator_classification(name: str, bio: str, titles: list[str], platform: str = "douyin") -> Dict[str, Any]:
     text = " ".join([name, bio, *titles])
     category = "综合"
@@ -1312,7 +1786,7 @@ def fallback_creator_classification(name: str, bio: str, titles: list[str], plat
         category = "科技产品"
     elif any(word in text for word in ["职场", "工作", "职业"]):
         category = "职业成长"
-    language = "英文" if re.search(r"\b[a-zA-Z]{4,}\b", text) and not re.search(r"[\u4e00-\u9fff]", text) else "中文"
+    language = detect_profile_language(text)
     if platform == "weibo":
         return {
             "category": category,
@@ -1320,6 +1794,8 @@ def fallback_creator_classification(name: str, bio: str, titles: list[str], plat
             "content_type": "文字",
             "tags": ["weibo", "文字", category],
         }
+    if platform == "x":
+        return classify_x_creator_locally(name, bio, titles)
     if platform == "xiaoyuzhou":
         return {
             "category": category,
@@ -1415,6 +1891,33 @@ def resolve_creator_from_url(payload: Dict[str, Any]) -> Dict[str, Any]:
             "content_type": "图文/视频",
             "bio": bio,
             "tags": classification.get("tags", ["xiaohongshu", "图文"]),
+        }
+    if platform == "x":
+        if "x.com" not in parsed.netloc and "twitter.com" not in parsed.netloc and not raw_url.startswith("@"):
+            raise ValueError("请输入 X 用户主页 URL，例如 https://x.com/username，或 @username。")
+        profile = fetch_x_creator_profile(raw_url if raw_url.startswith("@") else url)
+        username = str(profile.get("username") or "").strip()
+        name = clean_creator_name(str(profile.get("name") or "")) or f"@{username}"
+        if not username:
+            raise ValueError("没有识别到 X 用户名。请填写 https://x.com/username 或 @username。")
+        bio = strip_html_text(str(profile.get("bio", "")))[:500]
+        final_url = str(profile.get("url") or f"https://x.com/{username}")
+        key = unique_creator_key(normalize_key(username) or pinyin_initials(name), final_url, data)
+        recent_titles = [str(item) for item in (profile.get("recent_titles") or [])]
+        classification = classify_creator_locally(name, bio, recent_titles, "x")
+        return {
+            "key": key,
+            "platform": "x",
+            "platform_id": username,
+            "x_username": username,
+            "name": name,
+            "url": final_url,
+            "enabled": True,
+            "category": classification.get("category", "综合"),
+            "language": classification.get("language", "中文"),
+            "content_type": classification.get("content_type", "X 推文"),
+            "bio": bio,
+            "tags": classification.get("tags", ["x", "推文"]),
         }
     if platform == "xiaoyuzhou":
         if "xiaoyuzhoufm.com" not in parsed.netloc and "feed.xyzfm.space" not in parsed.netloc and "podcast.xyz" not in parsed.netloc:
@@ -1624,8 +2127,294 @@ def public_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "model": (data.get("summary") or {}).get("model", ""),
         },
         "retention": retention_config(data),
+        "content_filter": content_filter_config(data),
         "creators": public_creators,
     }
+
+
+def parse_utc_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def path_mtime_utc(path: Path) -> Optional[datetime]:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return None
+
+
+def latest_credential_mtime(paths: list[Path]) -> Optional[datetime]:
+    values = [value for value in (path_mtime_utc(path) for path in paths) if value]
+    return max(values) if values else None
+
+
+def first_enabled_creator(data: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    for creator in data.get("creators") or []:
+        if not isinstance(creator, dict):
+            continue
+        if creator.get("enabled") is False:
+            continue
+        if normalize_platform(creator.get("platform"), str(creator.get("url", ""))) == platform:
+            return creator
+    return {}
+
+
+def auth_validation_path(data: Dict[str, Any]) -> Path:
+    return configured_work_dir(data) / "auth_validation.json"
+
+
+def read_auth_validations(data: Dict[str, Any]) -> Dict[str, Any]:
+    path = auth_validation_path(data)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def write_auth_validations(data: Dict[str, Any], validations: Dict[str, Any]) -> None:
+    path = auth_validation_path(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(validations, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def latest_auth_validation(
+    data: Dict[str, Any],
+    platform: str,
+    credential_mtime: Optional[datetime],
+) -> Dict[str, Any]:
+    validation = read_auth_validations(data).get(platform)
+    if not isinstance(validation, dict):
+        return {}
+    validation_at = parse_utc_timestamp(validation.get("checked_at"))
+    if not validation_at:
+        return {}
+    if credential_mtime and validation_at < credential_mtime:
+        return {}
+    return validation
+
+
+def verify_weibo_auth(data: Dict[str, Any]) -> Dict[str, Any]:
+    cookie_file = project_path(str(data.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))
+    cookie = cookie_file.read_text(encoding="utf-8").strip() if cookie_file.exists() else ""
+    if not cookie:
+        return {"state": "missing", "message": "微博 Cookie 缺失。"}
+    creator = first_enabled_creator(data, "weibo")
+    url = str(creator.get("url") or "").strip()
+    if not url:
+        return {"state": "error", "message": "没有可用于验证的微博来源。先添加一个微博博主后即可验证。"}
+    profile = fetch_weibo_creator_profile(url, cookie)
+    if profile.get("name") or profile.get("recent_titles"):
+        name = clean_creator_name(str(profile.get("name") or creator.get("name") or "微博来源"))
+        return {"state": "ok", "message": f"微博登录态可用，已能读取：{name}。"}
+    errors = [str(item) for item in profile.get("errors") or []]
+    if any("login_required" in item or "visitor" in item for item in errors):
+        return {"state": "invalid", "message": "微博服务端不认可这份 Cookie，请重新登录 weibo.com 后用插件导入。"}
+    detail = "；".join(errors[-2:]) if errors else "没有拿到微博资料。"
+    return {"state": "error", "message": f"微博自动验证暂时失败：{detail}"}
+
+
+def verify_wechat_auth(data: Dict[str, Any]) -> Dict[str, Any]:
+    cookie, token = read_wechat_mp_auth(data)
+    if not cookie or not token:
+        return {"state": "missing", "message": "公众号后台 Cookie/token 缺失。"}
+    creator = first_enabled_creator(data, "wechat")
+    query = clean_creator_name(str(creator.get("name") or "")) or "微信"
+    try:
+        search_wechat_mp_accounts(query, data, size=1)
+    except ValueError as exc:
+        message = str(exc)
+        if "登录态失效" in message or "Cookie/token" in message:
+            return {"state": "invalid", "message": "公众号后台服务端不认可这份登录态，请重新打开 mp.weixin.qq.com 后台并用插件导入。"}
+        return {"state": "error", "message": f"公众号后台自动验证暂时失败：{message}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"state": "error", "message": f"公众号后台自动验证暂时失败：{type(exc).__name__}: {exc}"}
+    return {"state": "ok", "message": "公众号后台登录态可用，已能访问后台搜索接口。"}
+
+
+def verify_platform_auth(data: Dict[str, Any], platform: str) -> Dict[str, Any]:
+    platform = normalize_platform(platform)
+    if platform == "weibo":
+        credential_paths = [project_path(str(data.get("weibo_cookie_file", "local_tools/weibo_cookie.txt")))]
+        result = verify_weibo_auth(data)
+    elif platform == "wechat":
+        credential_paths = list(wechat_mp_secret_paths(data))
+        result = verify_wechat_auth(data)
+    else:
+        raise ValueError(f"{platform_label(platform)} 暂不支持登录态验证")
+    result = dict(result)
+    result["platform"] = platform
+    result["checked_at"] = utc_now()
+    credential_mtime = latest_credential_mtime(credential_paths)
+    if credential_mtime:
+        result["credential_updated_at"] = credential_mtime.isoformat(timespec="seconds")
+    return result
+
+
+def verify_auth_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = load_config()
+    raw_platforms = payload.get("platforms")
+    if isinstance(raw_platforms, list):
+        platforms = [normalize_platform(item) for item in raw_platforms]
+    else:
+        platform = normalize_platform(payload.get("platform"))
+        platforms = [platform] if platform else ["weibo", "wechat"]
+    platforms = [item for item in platforms if item in {"weibo", "wechat"}]
+    if not platforms:
+        platforms = ["weibo", "wechat"]
+
+    validations = read_auth_validations(data)
+    results: Dict[str, Any] = {}
+    for platform in platforms:
+        result = verify_platform_auth(data, platform)
+        validations[platform] = result
+        results[platform] = result
+    write_auth_validations(data, validations)
+    return {"results": results, "status": status_payload()}
+
+
+def platform_creator_keys(data: Dict[str, Any], platform: str) -> list[str]:
+    keys: list[str] = []
+    for creator in data.get("creators") or []:
+        if not isinstance(creator, dict):
+            continue
+        if normalize_platform(creator.get("platform"), str(creator.get("url", ""))) != platform:
+            continue
+        key = str(creator.get("key") or "").strip()
+        if key:
+            keys.append(key)
+    return keys
+
+
+def latest_platform_run_item(
+    data: Dict[str, Any],
+    platform: str,
+    *,
+    status: str,
+    error_markers: Optional[list[str]] = None,
+) -> Dict[str, Any]:
+    state_path = configured_state_path(data)
+    if not state_path.exists():
+        return {}
+    keys = platform_creator_keys(data, platform)
+    if not keys:
+        return {}
+    placeholders = ",".join("?" for _ in keys)
+    where = [f"creator_key IN ({placeholders})", "status = ?"]
+    params: list[Any] = [*keys, status]
+    if error_markers:
+        marker_sql = " OR ".join("COALESCE(error, '') LIKE ?" for _ in error_markers)
+        where.append(f"({marker_sql})")
+        params.extend([f"%{marker}%" for marker in error_markers])
+    try:
+        with sqlite3.connect(str(state_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                f"""
+                SELECT creator_key, creator_name, title, error, updated_at
+                FROM run_items
+                WHERE {' AND '.join(where)}
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+    except sqlite3.Error:
+        return {}
+    return dict(row) if row else {}
+
+
+def apply_service_auth_status(
+    status: Dict[str, Any],
+    data: Dict[str, Any],
+    platform: str,
+    credential_paths: list[Path],
+    error_markers: list[str],
+    *,
+    ok_message: str,
+    invalid_message: str,
+    pending_message: str,
+) -> Dict[str, Any]:
+    credential_ready = bool(status.get("ready"))
+    status["credential_ready"] = credential_ready
+    status["service_checked"] = True
+    status["service_ready"] = False
+    if not credential_ready:
+        status["ready"] = False
+        status["auth_state"] = "missing"
+        return status
+
+    credential_mtime = latest_credential_mtime(credential_paths)
+    if credential_mtime:
+        status["credential_updated_at"] = credential_mtime.isoformat(timespec="seconds")
+
+    latest_error = latest_platform_run_item(data, platform, status="failed", error_markers=error_markers)
+    latest_success = latest_platform_run_item(data, platform, status="success")
+    error_at = parse_utc_timestamp(latest_error.get("updated_at")) if latest_error else None
+    success_at = parse_utc_timestamp(latest_success.get("updated_at")) if latest_success else None
+
+    if latest_error:
+        status["last_auth_error_at"] = str(latest_error.get("updated_at") or "")
+        status["last_auth_error"] = str(latest_error.get("error") or "")
+    if latest_success:
+        status["last_auth_success_at"] = str(latest_success.get("updated_at") or "")
+
+    validation = latest_auth_validation(data, platform, credential_mtime)
+    if validation:
+        status["last_validation_at"] = str(validation.get("checked_at") or "")
+        state = str(validation.get("state") or "")
+        message = str(validation.get("message") or "").strip()
+        if state == "ok":
+            status["ready"] = True
+            status["service_ready"] = True
+            status["auth_state"] = "ok"
+            status["message"] = message or ok_message
+            return status
+        if state in {"invalid", "missing"}:
+            status["ready"] = False
+            status["service_ready"] = False
+            status["invalid"] = True
+            status["auth_state"] = "invalid"
+            status["message"] = message or invalid_message
+            return status
+        if state == "error":
+            status["ready"] = False
+            status["service_ready"] = None
+            status["auth_state"] = "pending"
+            status["message"] = message or pending_message
+            return status
+
+    if success_at and (not credential_mtime or success_at >= credential_mtime) and (not error_at or success_at >= error_at):
+        status["ready"] = True
+        status["service_ready"] = True
+        status["auth_state"] = "ok"
+        status["message"] = ok_message
+        return status
+
+    if error_at and (not credential_mtime or error_at >= credential_mtime):
+        status["ready"] = False
+        status["service_ready"] = False
+        status["invalid"] = True
+        status["auth_state"] = "invalid"
+        status["message"] = invalid_message
+        return status
+
+    status["ready"] = False
+    status["service_ready"] = None
+    status["auth_state"] = "pending"
+    status["message"] = pending_message
+    return status
 
 
 def status_payload() -> Dict[str, Any]:
@@ -1635,7 +2424,10 @@ def status_payload() -> Dict[str, Any]:
     xiaohongshu_cookie_file = project_path(str(data.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt")))
     wechat_mp_cookie_file, wechat_mp_token_file = wechat_mp_secret_paths(data)
     env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
-    api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
+    summary_cfg = data.get("summary") or {}
+    summary_provider = str(summary_cfg.get("provider", "ai")).strip() or "ai"
+    summary_model = str(summary_cfg.get("model", "")).strip()
+    api_key_env = str(summary_cfg.get("api_key_env", "AI_API_KEY"))
     vault_path = Path(str(data.get("vault_path", ""))).expanduser()
     output_subdirs = output_subdirs_config(data)
     output_paths = {platform: str(vault_path / subdir) for platform, subdir in output_subdirs.items()}
@@ -1647,6 +2439,30 @@ def status_payload() -> Dict[str, Any]:
     wechat_mp_token = file_ready(wechat_mp_token_file, ["paste_your", "PASTE_YOUR"])
     wechat_mp_cookie["token_ready"] = bool(wechat_mp_token.get("ready"))
     wechat_mp_cookie["ready"] = bool(wechat_mp_cookie.get("ready") and wechat_mp_token.get("ready"))
+    weibo_cookie = apply_service_auth_status(
+        weibo_cookie,
+        data,
+        "weibo",
+        [weibo_cookie_file],
+        ["微博 Cookie 已失效", "不被服务端认可", "登录态"],
+        ok_message="微博 Cookie 已经被最近一次抓取验证可用。",
+        invalid_message="微博 Cookie 文件存在，但最近抓取时服务端不认可这份登录态。请重新登录 weibo.com 后用插件导入。",
+        pending_message="微博 Cookie 文件已保存，但还没有经过最近一次抓取验证。",
+    )
+    wechat_mp_cookie = apply_service_auth_status(
+        wechat_mp_cookie,
+        data,
+        "wechat",
+        [wechat_mp_cookie_file, wechat_mp_token_file],
+        ["公众号后台 Cookie/token 已失效", "公众号后台登录态失效", "登录态失效"],
+        ok_message="公众号后台登录态已经被最近一次抓取验证可用。",
+        invalid_message="公众号后台 Cookie/token 文件存在，但最近抓取时服务端判定已失效。请重新打开 mp.weixin.qq.com 后台并用插件导入。",
+        pending_message="公众号后台 Cookie/token 已保存，但还没有经过最近一次抓取验证。",
+    )
+    platform_health = collect_platform_health(data, PROJECT_ROOT)
+    platform_health["weibo"] = {**platform_health.get("weibo", {}), **weibo_cookie, "label": "微博"}
+    platform_health["wechat"] = {**platform_health.get("wechat", {}), **wechat_mp_cookie, "label": "公众号"}
+    x_health = platform_health.get("x", {"ready": False, "message": "X 后端状态未知"})
     return {
         "time": utc_now(),
         "config_path": str(get_config_path()),
@@ -1663,6 +2479,12 @@ def status_payload() -> Dict[str, Any]:
                 "runnable": "weibo" in RUNNABLE_PLATFORMS,
                 "cookie": weibo_cookie,
             },
+            "x": {
+                "label": platform_label("x"),
+                "runnable": "x" in RUNNABLE_PLATFORMS,
+                "backend": x_health,
+                "cookie": x_health,
+            },
             "wechat": {
                 "label": platform_label("wechat"),
                 "runnable": "wechat" in RUNNABLE_PLATFORMS,
@@ -1675,10 +2497,18 @@ def status_payload() -> Dict[str, Any]:
                 "browser_login": browser_login_status(data, "xiaohongshu"),
             },
         },
+        "platform_health": platform_health,
+        "model_api": {
+            **env_status(env_file, api_key_env),
+            "provider": summary_provider,
+            "model": summary_model,
+            "api_key_env": api_key_env,
+        },
         "deepseek": env_status(env_file, api_key_env),
         "vault": {"path": str(vault_path), "exists": vault_path.exists()},
         "output": {"path": str(output_dir), "exists": output_dir.exists(), "paths": output_paths},
         "worker": worker_status(),
+        "health": latest_health_status(data),
     }
 
 
@@ -1693,8 +2523,7 @@ def output_root_path(data: Dict[str, Any]) -> Path:
 
 def configured_log_path(data: Optional[Dict[str, Any]] = None) -> Path:
     data = data or load_config()
-    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
-    return work_dir / "logs" / "dashboard_sync.log"
+    return configured_work_dir(data) / "logs" / "dashboard_sync.log"
 
 
 def configured_state_path(data: Optional[Dict[str, Any]] = None) -> Path:
@@ -1702,8 +2531,132 @@ def configured_state_path(data: Optional[Dict[str, Any]] = None) -> Path:
     return project_path(str(data.get("state_db", "local_tools/obsidian_sync/state.sqlite")))
 
 
+def configured_work_dir(data: Optional[Dict[str, Any]] = None) -> Path:
+    data = data or load_config()
+    return project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+
+
+def configured_health_status_path(data: Optional[Dict[str, Any]] = None) -> Path:
+    return configured_work_dir(data) / "health_status.json"
+
+
+def latest_health_status(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = data or load_config()
+    path = configured_health_status_path(data)
+    if not path.exists():
+        return {
+            "status": "unknown",
+            "label": "暂无自检",
+            "message": "还没有生成每日自检报告。",
+            "path": str(path),
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {
+            "status": "unknown",
+            "label": "自检状态异常",
+            "message": f"{type(exc).__name__}: {exc}",
+            "path": str(path),
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "unknown",
+            "label": "自检状态异常",
+            "message": "health_status.json 不是对象。",
+            "path": str(path),
+        }
+    labels = {
+        "ok": "自检正常",
+        "warn": "自检有可重试问题",
+        "bad": "自检需要处理",
+        "unknown": "暂无自检",
+    }
+    status = str(payload.get("status") or "unknown")
+    payload["label"] = labels.get(status, status)
+    payload["path"] = str(path)
+    return payload
+
+
 def make_run_id() -> str:
     return "run_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def control_dir(data: Dict[str, Any]) -> Path:
+    return configured_work_dir(data) / "control"
+
+
+def resume_state_path(data: Dict[str, Any]) -> Path:
+    return control_dir(data) / "resume_state.json"
+
+
+def pause_file_for_run(data: Dict[str, Any], run_id: str) -> Path:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id or "run").strip("_") or "run"
+    return control_dir(data) / f"pause_{safe_run_id}_{time.time_ns()}.flag"
+
+
+def json_safe(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def write_resume_state(data: Dict[str, Any], mode: str, payload: Dict[str, Any], run_id: str) -> None:
+    path = resume_state_path(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "mode": mode,
+                "payload": json_safe(payload),
+                "run_id": run_id,
+                "updated_at": utc_now(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def read_resume_state(data: Dict[str, Any]) -> Dict[str, Any]:
+    path = resume_state_path(data)
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def dashboard_run_by_id(data: Dict[str, Any], run_id: str) -> Dict[str, Any]:
+    state_path = configured_state_path(data)
+    if not run_id or not state_path.exists():
+        return {}
+    try:
+        with sqlite3.connect(str(state_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            return dict(row) if row else {}
+    except sqlite3.Error:
+        return {}
+
+
+def prepare_worker_control(data: Dict[str, Any], mode: str, payload: Dict[str, Any], run_id: str) -> Path:
+    path = pause_file_for_run(data, run_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_resume_state(data, mode, payload, run_id)
+    return path
+
+
+def append_worker_log(message: str) -> None:
+    global worker_log
+    data = load_config()
+    if worker_log is None:
+        worker_log = configured_log_path(data)
+    worker_log.parent.mkdir(parents=True, exist_ok=True)
+    with worker_log.open("a", encoding="utf-8") as log:
+        log.write(f"\n[{utc_now()}] {message}\n")
 
 
 def classify_log_lines(text: str) -> Dict[str, Any]:
@@ -2305,7 +3258,7 @@ def latest_run_progress(runs: list[Dict[str, Any]], running: bool) -> Dict[str, 
 
 
 def worker_status() -> Dict[str, Any]:
-    global worker_process, worker_log
+    global worker_process, worker_log, worker_pause_file
     data = load_config()
     if worker_log is None:
         worker_log = configured_log_path(data)
@@ -2323,9 +3276,22 @@ def worker_status() -> Dict[str, Any]:
     progress = latest_run_progress(db_runs, running) if db_runs else parse_progress(text, data, running)
     if history and not running and history[0]["status"] == "running":
         history[0]["status"] = "unknown"
+    resume_state = read_resume_state(data)
+    latest_run = history[0] if history else {}
+    latest_status = str(latest_run.get("status") or "")
+    resume_run_id = str(resume_state.get("run_id") or "")
+    latest_run_id = str(latest_run.get("run_id") or "")
+    paused = bool(not running and latest_status == "paused" and resume_run_id == latest_run_id)
+    pause_requested = bool(worker_pause_file and worker_pause_file.exists())
+    pausing = bool(running and (pause_requested or latest_status == "pausing"))
+    can_resume = bool(paused and resume_state.get("mode") and isinstance(resume_state.get("payload"), dict))
     output_base = output_base_path(data)
     return {
         "running": running,
+        "pause_supported": True,
+        "pausing": pausing,
+        "paused": paused,
+        "can_resume": can_resume,
         "returncode": code,
         "pid": worker_process.pid if running and worker_process else None,
         "log_path": str(worker_log) if worker_log else None,
@@ -2333,6 +3299,11 @@ def worker_status() -> Dict[str, Any]:
         "analysis": analysis,
         "progress": progress,
         "history": history,
+        "resume": {
+            "mode": resume_state.get("mode") if can_resume else "",
+            "run_id": resume_run_id if can_resume else "",
+            "updated_at": resume_state.get("updated_at") if can_resume else "",
+        },
         "output_path": str(output_base),
         "recent_files": recent_markdown_files(output_base),
     }
@@ -2366,10 +3337,13 @@ def normalize_creator(raw: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, An
         value = str(raw.get(field, "")).strip()
         if value:
             creator[field] = value
+    transcript_mode = str(raw.get("transcript_mode") or "auto").strip()
+    if transcript_mode in TRANSCRIPT_MODES and transcript_mode != "auto":
+        creator["transcript_mode"] = transcript_mode
     sec_user_id = str(raw.get("sec_user_id", "")).strip()
     if sec_user_id:
         creator["sec_user_id"] = sec_user_id
-    for field in ("platform_id", "weibo_uid", "weibo_custom", "xiaoyuzhou_pid", "xiaoyuzhou_eid", "wechat_biz", "wechat_fakeid", "rss_url", "feed_url"):
+    for field in ("platform_id", "x_username", "twitter_username", "weibo_uid", "weibo_custom", "xiaoyuzhou_pid", "xiaoyuzhou_eid", "wechat_biz", "wechat_fakeid", "rss_url", "feed_url"):
         value = str(raw.get(field, "")).strip()
         if value:
             creator[field] = value
@@ -2399,6 +3373,8 @@ def normalize_creator(raw: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, An
     cookie_profile = str(raw.get("cookie_profile", "")).strip()
     if cookie_profile:
         creator["cookie_profile"] = cookie_profile
+    if raw.get("filter_promotions") is False:
+        creator["filter_promotions"] = False
     return creator
 
 
@@ -2425,6 +3401,16 @@ def save_public_config(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("retention must be an object")
         current = retention_config(data)
         data["retention"] = {key: bool(raw_retention.get(key, current[key])) for key in current}
+    if "content_filter" in payload:
+        raw_filter = payload.get("content_filter")
+        if not isinstance(raw_filter, dict):
+            raise ValueError("content_filter must be an object")
+        current_filter = content_filter_config(data)
+        data["content_filter"] = {
+            "enabled": bool(raw_filter.get("enabled", current_filter["enabled"])),
+            "filter_promotions": bool(raw_filter.get("filter_promotions", current_filter["filter_promotions"])),
+            "min_score": int(raw_filter.get("min_score", current_filter["min_score"]) or current_filter["min_score"]),
+        }
     if "creators" in payload:
         creators = payload.get("creators")
         if not isinstance(creators, list):
@@ -2553,7 +3539,7 @@ def save_secrets(payload: Dict[str, Any]) -> Dict[str, Any]:
     wechat_mp_cookie = str(payload.get("wechat_mp_cookie", "")).strip()
     wechat_mp_token = str(payload.get("wechat_mp_token", "")).strip()
     xiaohongshu_cookie = str(payload.get("xiaohongshu_cookie", "")).strip()
-    api_key = str(payload.get("deepseek_api_key", "")).strip()
+    api_key = str(payload.get("api_key") or payload.get("deepseek_api_key", "")).strip()
     if cookie:
         cookie_file = project_path(str(data.get("douyin_cookie_file", "local_tools/douyin_cookie.txt")))
         cookie_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2576,8 +3562,15 @@ def save_secrets(payload: Dict[str, Any]) -> Dict[str, Any]:
         cookie_file.write_text(xiaohongshu_cookie + "\n", encoding="utf-8")
     if api_key:
         env_file = project_path(str(data.get("env_file", "local_tools/obsidian_sync/.env")))
-        api_key_env = str((data.get("summary") or {}).get("api_key_env", "DEEPSEEK_API_KEY"))
+        api_key_env = str((data.get("summary") or {}).get("api_key_env", "AI_API_KEY"))
         update_env_value(env_file, api_key_env, api_key)
+    platforms_to_verify = []
+    if weibo_cookie:
+        platforms_to_verify.append("weibo")
+    if wechat_mp_cookie or wechat_mp_token:
+        platforms_to_verify.append("wechat")
+    if platforms_to_verify:
+        verify_auth_payload({"platforms": platforms_to_verify})
     return status_payload()
 
 
@@ -2687,16 +3680,26 @@ def selected_run_items(data: Dict[str, Any], run_id: str, video_ids: list[str]) 
 
 
 def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
-    global worker_process, worker_log, worker_run_id
+    global worker_process, worker_log, worker_run_id, worker_pause_file
     if worker_process and worker_process.poll() is None:
         raise RuntimeError("A sync process is already running")
 
     data = load_config()
-    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    work_dir = configured_work_dir(data)
     log_dir = work_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     worker_log = log_dir / "dashboard_sync.log"
     worker_run_id = make_run_id()
+    run_payload = {
+        "creator": str(payload.get("creator", "")).strip(),
+        "limit": int(payload.get("limit", 0) or 0),
+        "dry_run": bool(payload.get("dry_run")),
+        "skip_summary": bool(payload.get("skip_summary")),
+        "force": bool(payload.get("force")),
+        "full_history": bool(payload.get("full_history")),
+        "recent_days": int(payload.get("recent_days", 0) or 0),
+    }
+    worker_pause_file = prepare_worker_control(data, "sync", run_payload, worker_run_id)
 
     cmd = [
         sys.executable,
@@ -2706,23 +3709,27 @@ def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         str(get_config_path()),
         "--run-id",
         worker_run_id,
+        "--pause-file",
+        str(worker_pause_file),
     ]
-    creator = str(payload.get("creator", "")).strip()
+    creator = run_payload["creator"]
     if creator:
         cmd.extend(["--creator", creator])
-    limit = int(payload.get("limit", 0) or 0)
+    limit = run_payload["limit"]
     if limit > 0:
         cmd.extend(["--limit", str(limit)])
-    if payload.get("dry_run"):
+    if run_payload["dry_run"]:
         cmd.append("--dry-run")
-    if payload.get("skip_summary"):
+    if run_payload["skip_summary"]:
         cmd.append("--skip-summary")
     else:
-        cmd.append("--with-deepseek")
-    if payload.get("force"):
+        cmd.append("--with-ai-summary")
+    if run_payload["force"]:
         cmd.append("--force")
-    if payload.get("full_history"):
+    if run_payload["full_history"]:
         cmd.append("--full-history")
+    if run_payload["recent_days"] > 0:
+        cmd.extend(["--recent-days", str(run_payload["recent_days"])])
 
     with worker_log.open("a", encoding="utf-8") as log:
         log.write(f"\n[{utc_now()}] START {worker_run_id} {' '.join(cmd)}\n")
@@ -2732,7 +3739,7 @@ def start_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def start_selected_items(payload: Dict[str, Any]) -> Dict[str, Any]:
-    global worker_process, worker_log, worker_run_id
+    global worker_process, worker_log, worker_run_id, worker_pause_file
     if worker_process and worker_process.poll() is None:
         raise RuntimeError("A sync process is already running")
 
@@ -2750,11 +3757,19 @@ def start_selected_items(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not video_ids:
         raise ValueError("候选记录里没有可抓取的内容 ID")
 
-    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    work_dir = configured_work_dir(data)
     log_dir = work_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     worker_log = log_dir / "dashboard_sync.log"
     worker_run_id = "selected_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_payload = {
+        "run_id": resolved_run_id,
+        "video_ids": video_ids,
+        "skip_summary": bool(payload.get("skip_summary")),
+        "force": bool(payload.get("force")),
+        "full_history": bool(payload.get("full_history")),
+    }
+    worker_pause_file = prepare_worker_control(data, "selected", run_payload, worker_run_id)
 
     cmd = [
         sys.executable,
@@ -2764,17 +3779,21 @@ def start_selected_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         str(get_config_path()),
         "--run-id",
         worker_run_id,
+        "--pause-file",
+        str(worker_pause_file),
         "--video-id",
         ",".join(video_ids),
     ]
     if len(creator_keys) == 1:
         cmd.extend(["--creator", creator_keys[0]])
-    if payload.get("skip_summary"):
+    if run_payload["skip_summary"]:
         cmd.append("--skip-summary")
     else:
-        cmd.append("--with-deepseek")
-    if payload.get("force"):
+        cmd.append("--with-ai-summary")
+    if run_payload["force"]:
         cmd.append("--force")
+    if run_payload["full_history"]:
+        cmd.append("--full-history")
 
     with worker_log.open("a", encoding="utf-8") as log:
         log.write(
@@ -2793,7 +3812,7 @@ def start_selected_items(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
-    global worker_process, worker_log, worker_run_id
+    global worker_process, worker_log, worker_run_id, worker_pause_file
     if worker_process and worker_process.poll() is None:
         raise RuntimeError("A sync process is already running")
 
@@ -2808,11 +3827,17 @@ def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not video_ids:
         raise ValueError("失败记录里没有可重爬的视频 ID")
 
-    work_dir = project_path(str(data.get("work_dir", "local_tools/obsidian_sync/work")))
+    work_dir = configured_work_dir(data)
     log_dir = work_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     worker_log = log_dir / "dashboard_sync.log"
     worker_run_id = "retry_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_payload = {
+        "run_id": resolved_run_id,
+        "skip_summary": bool(payload.get("skip_summary")),
+        "force": bool(payload.get("force", True)),
+    }
+    worker_pause_file = prepare_worker_control(data, "retry_failed", run_payload, worker_run_id)
 
     cmd = [
         sys.executable,
@@ -2822,16 +3847,18 @@ def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         str(get_config_path()),
         "--run-id",
         worker_run_id,
+        "--pause-file",
+        str(worker_pause_file),
         "--video-id",
         ",".join(video_ids),
     ]
     if len(creator_keys) == 1:
         cmd.extend(["--creator", creator_keys[0]])
-    if payload.get("skip_summary"):
+    if run_payload["skip_summary"]:
         cmd.append("--skip-summary")
     else:
-        cmd.append("--with-deepseek")
-    if payload.get("force", True):
+        cmd.append("--with-ai-summary")
+    if run_payload["force"]:
         cmd.append("--force")
 
     with worker_log.open("a", encoding="utf-8") as log:
@@ -2848,6 +3875,223 @@ def retry_failed_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         "creator_count": len(creator_keys),
     }
     return status
+
+
+def creator_platform_map(data: Dict[str, Any]) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for creator in data.get("creators") or []:
+        if not isinstance(creator, dict):
+            continue
+        key = str(creator.get("key") or "").strip()
+        if not key:
+            continue
+        mapping[key] = normalize_platform(creator.get("platform"), str(creator.get("url") or ""))
+    return mapping
+
+
+def health_item_platform(data: Dict[str, Any], item: Dict[str, Any]) -> str:
+    creator_key = str(item.get("creator_key") or "").strip()
+    by_key = creator_platform_map(data)
+    if creator_key in by_key:
+        return by_key[creator_key]
+    return normalize_platform("", str(item.get("source_url") or ""))
+
+
+def health_retry_candidates(data: Dict[str, Any], payload: Dict[str, Any]) -> tuple[Dict[str, Any], list[Dict[str, Any]]]:
+    health = latest_health_status(data)
+    failed_items = health.get("failed_items") if isinstance(health.get("failed_items"), list) else []
+    if not failed_items:
+        raise ValueError("最新自检没有剩余失败项可重爬")
+
+    scope = str(payload.get("scope") or "all").strip().lower()
+    platform = normalize_platform(payload.get("platform")) if payload.get("platform") else ""
+    items: list[Dict[str, Any]] = []
+    for item in failed_items:
+        if not isinstance(item, dict):
+            continue
+        item_platform = health_item_platform(data, item)
+        if scope == "platform" and platform and item_platform != platform:
+            continue
+        items.append(item)
+    if not items:
+        label = platform_label(platform) if platform else "当前筛选"
+        raise ValueError(f"{label}没有自检失败项可重爬")
+    return health, items
+
+
+def shell_join(cmd: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in cmd)
+
+
+def start_health_retry(payload: Dict[str, Any]) -> Dict[str, Any]:
+    global worker_process, worker_log, worker_run_id, worker_pause_file
+    if worker_process and worker_process.poll() is None:
+        raise RuntimeError("A sync process is already running")
+
+    data = load_config()
+    health, items = health_retry_candidates(data, payload)
+    source_keys = sorted({
+        str(item.get("creator_key") or "").strip()
+        for item in items
+        if str(item.get("video_id") or "").startswith("source_error_") and str(item.get("creator_key") or "").strip()
+    })
+    exact_items = [
+        item for item in items
+        if not str(item.get("video_id") or "").startswith("source_error_") and str(item.get("video_id") or "").strip()
+    ]
+    exact_video_ids = sorted({str(item.get("video_id") or "").strip() for item in exact_items})
+    exact_creator_keys = sorted({str(item.get("creator_key") or "").strip() for item in exact_items if str(item.get("creator_key") or "").strip()})
+    if not source_keys and not exact_video_ids:
+        raise ValueError("自检失败记录里没有可重爬的内容源或内容 ID")
+
+    health_cfg = data.get("health_check") if isinstance(data.get("health_check"), dict) else {}
+    retry_limit = max(1, int(health_cfg.get("retry_limit_per_source", 20) or 20))
+    retry_recent_days = max(1, int(health_cfg.get("retry_recent_days", 3) or 3))
+    skip_summary = bool(payload.get("skip_summary"))
+    force_exact = bool(payload.get("force", True))
+
+    work_dir = configured_work_dir(data)
+    log_dir = work_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    worker_log = log_dir / "dashboard_sync.log"
+    worker_run_id = "health_retry_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_payload = {
+        "scope": str(payload.get("scope") or "all"),
+        "platform": str(payload.get("platform") or ""),
+        "skip_summary": skip_summary,
+        "force": force_exact,
+    }
+    worker_pause_file = prepare_worker_control(data, "health_retry", run_payload, worker_run_id)
+
+    commands: list[list[str]] = []
+    if source_keys:
+        source_cmd = [
+            sys.executable,
+            "-u",
+            str(PROJECT_ROOT / "local_tools" / "obsidian_sync" / "sync.py"),
+            "--config",
+            str(get_config_path()),
+            "--run-id",
+            f"{worker_run_id}_source",
+            "--pause-file",
+            str(worker_pause_file),
+            "--creators",
+            ",".join(source_keys),
+            "--limit",
+            str(retry_limit),
+            "--recent-days",
+            str(retry_recent_days),
+        ]
+        source_cmd.append("--skip-summary" if skip_summary else "--with-ai-summary")
+        commands.append(source_cmd)
+    if exact_video_ids:
+        exact_cmd = [
+            sys.executable,
+            "-u",
+            str(PROJECT_ROOT / "local_tools" / "obsidian_sync" / "sync.py"),
+            "--config",
+            str(get_config_path()),
+            "--run-id",
+            f"{worker_run_id}_items",
+            "--pause-file",
+            str(worker_pause_file),
+            "--video-id",
+            ",".join(exact_video_ids),
+        ]
+        if exact_creator_keys:
+            exact_cmd.extend(["--creators", ",".join(exact_creator_keys)])
+        exact_cmd.append("--skip-summary" if skip_summary else "--with-ai-summary")
+        if force_exact:
+            exact_cmd.append("--force")
+        commands.append(exact_cmd)
+
+    script_lines = ["status=0"]
+    for cmd in commands:
+        script_lines.append(f"{shell_join(cmd)} || status=$?")
+    script_lines.append("exit $status")
+    script = "\n".join(script_lines)
+
+    with worker_log.open("a", encoding="utf-8") as log:
+        log.write(
+            f"\n[{utc_now()}] HEALTH_RETRY source_run={health.get('primary_run', {}).get('run_id', '')} "
+            f"scope={run_payload['scope']} platform={run_payload['platform']} "
+            f"source_creators={len(source_keys)} exact_items={len(exact_video_ids)} {worker_run_id}\n"
+        )
+        for cmd in commands:
+            log.write(f"HEALTH_RETRY_CMD {shell_join(cmd)}\n")
+        log.flush()
+        worker_process = subprocess.Popen(["/bin/bash", "-lc", script], cwd=str(PROJECT_ROOT), stdout=log, stderr=log)
+
+    status = worker_status()
+    status["health_retry"] = {
+        "source_run_id": str((health.get("primary_run") or {}).get("run_id") or ""),
+        "item_count": len(items),
+        "source_creator_count": len(source_keys),
+        "exact_item_count": len(exact_video_ids),
+    }
+    return status
+
+
+def pause_sync() -> Dict[str, Any]:
+    global worker_pause_file
+    if not (worker_process and worker_process.poll() is None):
+        raise RuntimeError("当前没有运行中的任务")
+
+    data = load_config()
+    run_id = worker_run_id or ""
+    if worker_pause_file is None:
+        worker_pause_file = pause_file_for_run(data, run_id or "unknown")
+    worker_pause_file.parent.mkdir(parents=True, exist_ok=True)
+    worker_pause_file.write_text(
+        json.dumps({"run_id": run_id, "requested_at": utc_now()}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    if run_id:
+        state_path = configured_state_path(data)
+        if state_path.exists():
+            with sqlite3.connect(str(state_path)) as conn:
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'pausing',
+                        current_stage = '正在暂停，等待已开始的内容完成',
+                        updated_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (utc_now(), run_id),
+                )
+                conn.commit()
+    append_worker_log(f"PAUSE_REQUEST {run_id} {worker_pause_file}")
+    return worker_status()
+
+
+def resume_sync() -> Dict[str, Any]:
+    if worker_process and worker_process.poll() is None:
+        raise RuntimeError("A sync process is already running")
+
+    data = load_config()
+    resume_state = read_resume_state(data)
+    mode = str(resume_state.get("mode") or "").strip()
+    payload = resume_state.get("payload") if isinstance(resume_state.get("payload"), dict) else {}
+    paused_run_id = str(resume_state.get("run_id") or "").strip()
+    if not mode or not payload or not paused_run_id:
+        raise RuntimeError("没有可继续的暂停任务")
+
+    paused_run = dashboard_run_by_id(data, paused_run_id)
+    if str(paused_run.get("status") or "") != "paused":
+        raise RuntimeError("最近任务不是可继续的暂停状态")
+
+    resume_payload = dict(payload)
+    resume_payload["force"] = False
+    if mode == "sync":
+        return start_sync(resume_payload)
+    if mode == "selected":
+        return start_selected_items(resume_payload)
+    if mode == "retry_failed":
+        return retry_failed_items(resume_payload)
+    if mode == "health_retry":
+        return start_health_retry(resume_payload)
+    raise RuntimeError(f"不支持继续这种任务类型：{mode}")
 
 
 def stop_sync() -> Dict[str, Any]:
@@ -2940,6 +4184,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "config": public_config(load_config())})
             elif path == "/api/status":
                 self.send_json(HTTPStatus.OK, {"ok": True, "status": status_payload()})
+            elif path == "/api/health":
+                self.send_json(HTTPStatus.OK, {"ok": True, "health": latest_health_status(load_config())})
             elif path == "/api/run/status":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": worker_status()})
             elif path == "/api/run/items":
@@ -2983,6 +4229,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "config": save_public_config(payload)})
             elif path == "/api/secrets":
                 self.send_json(HTTPStatus.OK, {"ok": True, "status": save_secrets(payload)})
+            elif path == "/api/auth/verify":
+                self.send_json(HTTPStatus.OK, {"ok": True, **verify_auth_payload(payload)})
             elif path == "/api/browser-login/start":
                 self.send_json(HTTPStatus.OK, {"ok": True, **start_browser_login(payload)})
             elif path == "/api/creator/resolve":
@@ -2995,6 +4243,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_selected_items(payload)})
             elif path == "/api/run/retry-failed":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": retry_failed_items(payload)})
+            elif path == "/api/health/retry":
+                self.send_json(HTTPStatus.OK, {"ok": True, "worker": start_health_retry(payload)})
+            elif path == "/api/run/pause":
+                self.send_json(HTTPStatus.OK, {"ok": True, "worker": pause_sync()})
+            elif path == "/api/run/resume":
+                self.send_json(HTTPStatus.OK, {"ok": True, "worker": resume_sync()})
             elif path == "/api/run/stop":
                 self.send_json(HTTPStatus.OK, {"ok": True, "worker": stop_sync()})
             elif path == "/api/open":
