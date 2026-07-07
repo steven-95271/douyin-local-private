@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Douyin Local Collector",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "description": "Collect Douyin URLs and sync platform cookies to the local private dashboard.",
   "permissions": ["activeTab", "storage", "downloads", "cookies", "scripting", "tabs"],
   "host_permissions": [
@@ -19,10 +19,6 @@
     "https://*.sina.cn/*",
     "https://mp.weixin.qq.com/*",
     "https://*.weixin.qq.com/*",
-    "https://xiaohongshu.com/*",
-    "https://*.xiaohongshu.com/*",
-    "https://xhslink.com/*",
-    "https://*.xhslink.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*",
     "http://127.0.0.1:8787/*",
@@ -36,9 +32,7 @@
     {
       "matches": [
         "https://www.douyin.com/*",
-        "https://v.douyin.com/*",
-        "https://www.xiaohongshu.com/*",
-        "https://xhslink.com/*"
+        "https://v.douyin.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

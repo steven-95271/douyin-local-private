@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Content Obsidian Sync</title>
-    <link rel="stylesheet" href="/app.css?v=20260707-health-retry">
+    <link rel="stylesheet" href="/app.css?v=20260707-youtube-groups">
   </head>
   <body>
     <div class="shell">
@@ -37,7 +37,6 @@
             <span id="weiboCookieBadge" class="badge">微博 Cookie</span>
             <span id="xBackendBadge" class="badge">X 后端</span>
             <span id="wechatCookieBadge" class="badge">公众号后台</span>
-            <span id="xiaohongshuCookieBadge" class="badge">小红书登录</span>
             <span id="keyBadge" class="badge">模型 API</span>
             <span id="healthBadge" class="badge">自检</span>
             <span id="workerBadge" class="badge">Idle</span>
@@ -48,7 +47,7 @@
           <div class="panel-head">
             <div>
               <h3>内容源库</h3>
-              <p>抖音、微博、小宇宙、公众号来源可直接抓取；YouTube、B站、TikTok 先作为来源档案预留，抓取适配器后续接入。</p>
+              <p>抖音、微博、X、小宇宙、公众号、YouTube 可直接抓取；来源按平台和分类折叠，展开后可编辑。</p>
             </div>
             <button id="addCreator" type="button">添加内容源</button>
           </div>
@@ -61,7 +60,6 @@
                 <option value="x">X</option>
                 <option value="xiaoyuzhou">小宇宙</option>
                 <option value="wechat">公众号</option>
-                <option value="xiaohongshu">小红书</option>
                 <option value="youtube">YouTube</option>
                 <option value="bilibili">B站</option>
                 <option value="tiktok">TikTok</option>
@@ -105,9 +103,6 @@
                 </label>
                 <label>公众号子目录
                   <input id="outputSubdirWechat" type="text" placeholder="WeChat/公众号">
-                </label>
-                <label>小红书子目录
-                  <input id="outputSubdirXiaohongshu" type="text" placeholder="Xiaohongshu/内容源">
                 </label>
                 <label>YouTube 子目录
                   <input id="outputSubdirYoutube" type="text" placeholder="YouTube/视频博主">
@@ -156,9 +151,9 @@
               <h4>抓取前过滤</h4>
               <label class="check">
                 <input id="filterPromotions" type="checkbox" checked>
-                <span>过滤商单、推广、直播通告</span>
+                <span>过滤低价值内容</span>
               </label>
-              <p class="field-help">在下载、OCR、Whisper 和 AI 总结前，用标题/正文元数据跳过明显的商单、带货、导流、直播预告等低价值内容。</p>
+              <p class="field-help">在下载、OCR、Whisper 和 AI 总结前，用标题、描述、话题标签跳过明显的商单、导流、直播预告、唱歌跳舞、随拍打卡等低价值内容。</p>
             </div>
             <button id="saveSettings" type="button">保存输出设置</button>
           </div>
@@ -184,13 +179,8 @@
                 <span id="wechatAccountText">可通过 Chrome 插件导入公众号后台 Cookie，用于名称搜索和历史文章同步</span>
                 <button id="verifyWechatAuth" type="button" class="secondary small">验证</button>
               </div>
-              <div>
-                <strong>小红书</strong>
-                <span id="xiaohongshuAccountText">建议使用扫码登录</span>
-                <button id="xiaohongshuQrLogin" type="button" class="secondary small">扫码登录</button>
-              </div>
             </div>
-            <p>抖音和小红书建议用扫码登录。系统会打开真实 Chrome 窗口，登录成功后保存本地浏览器 profile，并把当前会话同步给抓取流程。</p>
+            <p>抖音建议用扫码登录。系统会打开真实 Chrome 窗口，登录成功后保存本地浏览器 profile，并把当前会话同步给抓取流程。</p>
             <details class="manual-cookie">
               <summary>抖音 Cookie 手动备用（不推荐）</summary>
               <label>抖音 Cookie
@@ -241,7 +231,7 @@
             <button id="stopRun" type="button" class="secondary">停止任务</button>
             <button id="openOutput" type="button" class="secondary">打开输出目录</button>
           </div>
-          <p class="run-note">搜索框支持名称、平台、分类、标签；灰色项代表已入库但抓取适配器待接入。建议先全量嗅探候选内容，再在运行记录里勾选需要抓取的条目。当前可正式抓取平台：抖音、微博、X、小宇宙、公众号、小红书。</p>
+          <p class="run-note">搜索框支持名称、平台、分类、标签；灰色项代表已入库但抓取适配器待接入。建议先全量嗅探候选内容，再在运行记录里勾选需要抓取的条目。当前可正式抓取平台：抖音、微博、X、小宇宙、公众号。</p>
           <div id="progressBox" class="progress-box">
             <div class="progress-head">
               <strong id="progressLabel">暂无进度</strong>

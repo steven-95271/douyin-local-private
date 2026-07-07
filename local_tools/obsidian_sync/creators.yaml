@@ -7,7 +7,6 @@ douyin_cookie_file: local_tools/douyin_cookie.txt
 weibo_cookie_file: local_tools/weibo_cookie.txt
 wechat_mp_cookie_file: local_tools/wechat_mp_cookie.txt
 wechat_mp_token_file: local_tools/wechat_mp_token.txt
-xiaohongshu_cookie_file: local_tools/xiaohongshu_cookie.txt
 fetch:
   count_per_page: 20
   max_pages: 50
@@ -17,11 +16,6 @@ fetch:
   wechat_mp_full_max_pages: 1000
   wechat_mp_delay_seconds: 3
   delay_seconds: 2
-xhs_downloader:
-  enabled: true
-  api_url: http://127.0.0.1:5556/xhs/detail
-  download: false
-  timeout_seconds: 30
 download:
   watermark: keep
   timeout_seconds: 120
@@ -35,6 +29,7 @@ retention:
 content_filter:
   enabled: true
   filter_promotions: true
+  filter_non_speech: true
   min_score: 6
 transcribe:
   provider: faster_whisper
@@ -66,6 +61,21 @@ summary:
   temperature: 0.2
   max_tokens: 5000
   prompt: local_tools/obsidian_sync/prompts/summarize.md
+  foreign_prompt: local_tools/obsidian_sync/prompts/foreign_summarize.md
+  output_language: 中文
+youtube:
+  max_videos: 30
+  full_max_videos: 300
+  subtitle_languages:
+  - zh-Hans
+  - zh-CN
+  - zh
+  - en
+  - en-US
+  - en-GB
+  audio_timeout_seconds: 600
+youtube_transcribe:
+  language: auto
 podcast_transcribe:
   language: auto
 podcast_summary:
@@ -400,7 +410,6 @@ output_subdirs:
   x: X/内容源
   xiaoyuzhou: Podcast/小宇宙
   wechat: WeChat/公众号
-  xiaohongshu: Xiaohongshu/内容源
   youtube: YouTube/视频博主
   bilibili: Bilibili/视频博主
   tiktok: TikTok/视频博主

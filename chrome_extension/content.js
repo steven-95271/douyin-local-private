@@ -5,12 +5,6 @@ const DOUYIN_PATTERNS = [
   /https?:\/\/www\.douyin\.com\/[^"'<> ]*[?&]vid=\d+/i,
   /https?:\/\/v\.douyin\.com\/[A-Za-z0-9_-]+\/?/i
 ];
-const XIAOHONGSHU_PATTERNS = [
-  /https?:\/\/www\.xiaohongshu\.com\/explore\/[A-Za-z0-9]+[^"'<> ]*/i,
-  /https?:\/\/www\.xiaohongshu\.com\/discovery\/item\/[A-Za-z0-9]+[^"'<> ]*/i,
-  /https?:\/\/www\.xiaohongshu\.com\/user\/profile\/[A-Za-z0-9]+\/[A-Za-z0-9]+[^"'<> ]*/i,
-  /https?:\/\/xhslink\.com\/[A-Za-z0-9_-]+\/?/i
-];
 
 function cleanUrl(value) {
   if (!value || typeof value !== "string") return null;
@@ -30,31 +24,6 @@ function cleanUrl(value) {
         if (modalId) return `https://www.douyin.com/video/${modalId}`;
         const vid = url.searchParams.get("vid");
         if (vid) return `https://www.douyin.com/video/${vid}`;
-      }
-      return url.toString();
-    } catch (_error) {
-      return match[0];
-    }
-  }
-  for (const pattern of XIAOHONGSHU_PATTERNS) {
-    const match = text.match(pattern);
-    if (!match) continue;
-    try {
-      const url = new URL(match[0], location.href);
-      url.hash = "";
-      if (url.hostname === "www.xiaohongshu.com") {
-        const explore = url.pathname.match(/^\/explore\/([A-Za-z0-9]+)/);
-        const discovery = url.pathname.match(/^\/discovery\/item\/([A-Za-z0-9]+)/);
-        const profileNote = url.pathname.match(/^\/user\/profile\/[A-Za-z0-9]+\/([A-Za-z0-9]+)/);
-        const noteId = explore?.[1] || discovery?.[1] || profileNote?.[1] || "";
-        if (noteId) {
-          const clean = new URL(`https://www.xiaohongshu.com/explore/${noteId}`);
-          for (const key of ["xsec_token", "xsec_source"]) {
-            const value = url.searchParams.get(key);
-            if (value) clean.searchParams.set(key, value);
-          }
-          return clean.toString();
-        }
       }
       return url.toString();
     } catch (_error) {
@@ -91,7 +60,7 @@ function titleForLink(node) {
   }
   for (const candidate of candidates) {
     const title = cleanTitle(candidate);
-    if (title && title.length >= 2 && title.length <= 120 && !/(点赞|评论|收藏|关注|粉丝|小红书号|IP属地)/.test(title)) {
+    if (title && title.length >= 2 && title.length <= 120 && !/(点赞|评论|收藏|关注|粉丝|IP属地)/.test(title)) {
       return title;
     }
   }

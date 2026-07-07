@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -118,11 +119,6 @@ def collect_platform_health(config: Dict[str, Any], project_root: Path) -> Dict[
         project_path(project_root, str(config.get("weibo_cookie_file", "local_tools/weibo_cookie.txt"))),
         placeholder_markers=placeholders,
     )
-    xiaohongshu = secret_file_status(
-        project_path(project_root, str(config.get("xiaohongshu_cookie_file", "local_tools/xiaohongshu_cookie.txt"))),
-        markers=("web_session=",),
-        placeholder_markers=placeholders,
-    )
     wechat_cookie = secret_file_status(
         project_path(project_root, str(config.get("wechat_mp_cookie_file", "local_tools/wechat_mp_cookie.txt"))),
         placeholder_markers=placeholders,
@@ -136,11 +132,17 @@ def collect_platform_health(config: Dict[str, Any], project_root: Path) -> Dict[
         "token_ready": bool(wechat_token.get("ready")),
         "ready": bool(wechat_cookie.get("ready") and wechat_token.get("ready")),
     }
+    youtube_ready = importlib.util.find_spec("yt_dlp") is not None
     return {
         "douyin": {**douyin, "label": "抖音"},
         "weibo": {**weibo, "label": "微博", "message": "Cookie 文件存在时允许抓取；服务端是否认可会在抓取时确认"},
         "wechat": {**wechat, "label": "公众号"},
-        "xiaohongshu": {**xiaohongshu, "label": "小红书"},
         "xiaoyuzhou": {"ready": True, "exists": True, "label": "小宇宙", "message": "公开 RSS/页面无需登录"},
+        "youtube": {
+            "ready": youtube_ready,
+            "exists": youtube_ready,
+            "label": "YouTube",
+            "message": "公开频道优先读取字幕；缺少 yt-dlp 时请安装项目依赖",
+        },
         "x": {"label": "X", **x_backend_status()},
     }

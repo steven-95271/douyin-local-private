@@ -50,7 +50,6 @@ from local_tools.obsidian_sync.platforms.base import PlatformRunContext  # noqa:
 from local_tools.obsidian_sync.platforms.registry import PlatformRegistry  # noqa: E402
 from local_tools.obsidian_sync.subtitle_ocr import transcribe_subtitles_from_video  # noqa: E402
 from local_tools.obsidian_sync.tagging import assign_tags  # noqa: E402
-from local_tools.obsidian_sync.platforms.xiaohongshu.crawler import XiaohongshuCrawler  # noqa: E402
 
 
 VIDEO_TYPES = {0, 4, 51, 55, 58, 61}
@@ -68,7 +67,7 @@ KNOWN_PLATFORMS = {
     "tieba",
     "zhihu",
 }
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"}
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "youtube"}
 TRANSCRIPT_MODES = {"auto", "audio", "subtitle_ocr", "subtitle_ocr_fallback_audio"}
 WHISPER_MODEL_CACHE: Dict[Tuple[str, str, str], Any] = {}
 WHISPER_MODEL_LOCK = threading.Lock()
@@ -82,6 +81,21 @@ PROMOTION_FILTER_RULES: List[Tuple[str, int, str]] = [
     (r"(课程报名|训练营报名|社群招募|限时招生|一对一咨询|付费咨询|咨询入口|预约咨询|报名入口)", 6, "课程/咨询转化"),
     (r"(转发抽|评论抽|抽奖|粉丝福利|福利来了)", 5, "福利抽奖"),
 ]
+NON_SPEECH_FILTER_RULES: List[Tuple[str, int, str]] = [
+    (r"(唱歌|翻唱|清唱|原唱|合唱|伴奏|KTV|卡拉OK|cover|一首歌|弹唱|即兴唱|音乐现场|唱一段)", 8, "唱歌/音乐"),
+    (r"(跳舞|舞蹈|热舞|手势舞|宅舞|广场舞|舞蹈挑战|扭一扭|变装|卡点|舞台表演)", 8, "跳舞/表演"),
+    (r"(随拍|随手拍|街拍|对镜拍|自拍|美照|写真|颜值|氛围感|今日穿搭|OOTD|ootd|妆容|美甲|发型|变美|身材展示)", 6, "生活/颜值展示"),
+    (r"(日常碎片|生活碎片|生活记录|记录生活|生活随拍|今日份快乐|随便拍拍|无聊拍|库存视频|路过拍一下|打卡|plog|vlog日常)", 6, "生活记录"),
+    (r"(风景|夜景|夕阳|天空|花海|海边|旅行打卡|探店打卡|城市漫步)", 5, "风景/打卡"),
+]
+NON_SPEECH_EXEMPTION_PATTERN = (
+    r"(怎么|如何|为什么|教程|技巧|方法|攻略|复盘|分析|拆解|解读|避坑|经验|逻辑|运营|增长).{0,16}"
+    r"(唱歌|音乐|跳舞|舞蹈|穿搭|拍摄|vlog|短视频|表演|直播)"
+    r"|"
+    r"(唱歌|音乐|跳舞|舞蹈|穿搭|拍摄|vlog|短视频|表演|直播).{0,16}"
+    r"(教程|技巧|方法|攻略|复盘|分析|拆解|解读|避坑|经验|逻辑|运营|增长)"
+)
+TALKING_CONTENT_CUE_PATTERN = r"(口播|干货|解读|分析|复盘|观点|认知|方法|教程|经验|思考|逻辑|为什么|怎么|如何|讲|聊|谈|分享|总结|建议|避坑|案例|问答|访谈|读书|商业|创业|投资|AI|工具|运营|增长|跨境|电商)"
 
 
 @dataclass
@@ -161,6 +175,7 @@ def content_filter_config(config: Dict[str, Any]) -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
         "enabled": True,
         "filter_promotions": True,
+        "filter_non_speech": True,
         "min_score": 6,
     }
     raw = config.get("content_filter")
@@ -170,6 +185,7 @@ def content_filter_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 defaults[key] = raw.get(key)
     defaults["enabled"] = bool(defaults.get("enabled"))
     defaults["filter_promotions"] = bool(defaults.get("filter_promotions"))
+    defaults["filter_non_speech"] = bool(defaults.get("filter_non_speech"))
     try:
         defaults["min_score"] = int(defaults.get("min_score") or 6)
     except (TypeError, ValueError):
@@ -181,11 +197,37 @@ def creator_promotion_filter_enabled(creator: Dict[str, Any], config: Dict[str, 
     if bool(getattr(args, "no_content_filter", False)):
         return False
     cfg = content_filter_config(config)
-    if not cfg["enabled"] or not cfg["filter_promotions"]:
+    if not cfg["enabled"] or not (cfg["filter_promotions"] or cfg["filter_non_speech"]):
         return False
     if creator.get("filter_promotions") is False:
         return False
     return True
+
+
+def metadata_filter_parts(raw: Dict[str, Any]) -> List[str]:
+    parts: List[str] = []
+    for key in ("share_title", "share_desc", "seo_title", "keyword", "keywords"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    for key in ("text_extra", "cha_list", "challenge_position"):
+        values = raw.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            for child_key in ("hashtag_name", "cha_name", "desc", "name"):
+                value = item.get(child_key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+    music = raw.get("music")
+    if isinstance(music, dict):
+        for key in ("title", "author", "owner_nickname"):
+            value = music.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+    return parts
 
 
 def filter_text_parts(video: CreatorVideo) -> Tuple[str, str]:
@@ -208,17 +250,15 @@ def filter_text_parts(video: CreatorVideo) -> Tuple[str, str]:
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             parts.append(value.strip())
+    parts.extend(metadata_filter_parts(raw))
     body = "\n".join(dict.fromkeys(parts))
     return title, body[:5000]
 
 
-def promotion_filter_reason(video: CreatorVideo, config: Dict[str, Any]) -> str:
-    cfg = content_filter_config(config)
-    min_score = int(cfg["min_score"])
-    title, body = filter_text_parts(video)
+def score_filter_rules(title: str, body: str, rules: List[Tuple[str, int, str]]) -> Tuple[int, List[str]]:
     matched_labels: List[str] = []
     score = 0
-    for pattern, weight, label in PROMOTION_FILTER_RULES:
+    for pattern, weight, label in rules:
         title_hit = re.search(pattern, title, flags=re.IGNORECASE)
         body_hit = re.search(pattern, body, flags=re.IGNORECASE)
         if title_hit:
@@ -227,10 +267,35 @@ def promotion_filter_reason(video: CreatorVideo, config: Dict[str, Any]) -> str:
             score += weight
         if title_hit or body_hit:
             matched_labels.append(label)
-    if score < min_score:
-        return ""
-    labels = "、".join(dict.fromkeys(matched_labels))
-    return f"命中推广过滤：{labels}。已跳过下载、转录和 AI 总结。"
+    return score, matched_labels
+
+
+def low_value_filter_reason(video: CreatorVideo, config: Dict[str, Any]) -> str:
+    cfg = content_filter_config(config)
+    min_score = int(cfg["min_score"])
+    title, body = filter_text_parts(video)
+    if cfg["filter_promotions"]:
+        score, matched_labels = score_filter_rules(title, body, PROMOTION_FILTER_RULES)
+        if score >= min_score:
+            labels = "、".join(dict.fromkeys(matched_labels))
+            return f"命中推广过滤：{labels}。已跳过下载、转录和 AI 总结。"
+
+    video_like_platforms = {"douyin", "tiktok", "kuaishou", "bilibili", "youtube", "xiaohongshu"}
+    if cfg["filter_non_speech"] and video.platform in video_like_platforms:
+        combined = f"{title}\n{body}"
+        if re.search(NON_SPEECH_EXEMPTION_PATTERN, combined, flags=re.IGNORECASE):
+            return ""
+        score, matched_labels = score_filter_rules(title, body, NON_SPEECH_FILTER_RULES)
+        if re.search(TALKING_CONTENT_CUE_PATTERN, combined, flags=re.IGNORECASE):
+            score = max(0, score - 3)
+        if score >= min_score:
+            labels = "、".join(dict.fromkeys(matched_labels))
+            return f"命中非口播/低信息密度过滤：{labels}。已跳过下载、转录和 AI 总结。"
+    return ""
+
+
+def promotion_filter_reason(video: CreatorVideo, config: Dict[str, Any]) -> str:
+    return low_value_filter_reason(video, config)
 
 
 def transcript_mode_for_video(video: "CreatorVideo") -> str:
@@ -280,7 +345,6 @@ def default_output_subdirs(config: Optional[Dict[str, Any]] = None) -> Dict[str,
         "x": "X/内容源",
         "xiaoyuzhou": "Podcast/小宇宙",
         "wechat": "WeChat/公众号",
-        "xiaohongshu": "Xiaohongshu/内容源",
         "youtube": "YouTube/视频博主",
         "bilibili": "Bilibili/视频博主",
         "tiktok": "TikTok/视频博主",
@@ -395,10 +459,6 @@ def creator_prerequisite_error(config: Dict[str, Any], creator: Dict[str, Any]) 
     if platform == "weibo":
         if not read_optional_secret(weibo_cookie_profile_path(config, creator)):
             return "微博 Cookie 缺失。请先登录微博并用 Chrome 插件导入 Cookie。"
-    if platform == "xiaohongshu":
-        text = read_optional_secret(xiaohongshu_cookie_path(config))
-        if "web_session=" not in text:
-            return "小红书 Cookie 缺失。请先登录小红书并用 Chrome 插件导入 Cookie。"
     if platform == "wechat" and wechat_fakeid_from_creator(creator):
         if not read_optional_secret(wechat_mp_cookie_path(config)) or not read_optional_secret(wechat_mp_token_path(config)):
             return "公众号后台 Cookie/token 缺失。请先登录 mp.weixin.qq.com 后台并用 Chrome 插件导入公众号后台 Cookie。"
@@ -2526,12 +2586,6 @@ async def fetch_xiaohongshu_notes(
 
 def build_platform_registry() -> PlatformRegistry:
     registry = PlatformRegistry()
-    registry.register(
-        XiaohongshuCrawler(
-            sniff_notes=fetch_xiaohongshu_notes,
-            fetch_note=fetch_xiaohongshu_note,
-        )
-    )
     return registry
 
 
@@ -2812,6 +2866,139 @@ async def fetch_weibo_posts(
     return videos
 
 
+def import_yt_dlp() -> Any:
+    try:
+        import yt_dlp  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("YouTube 抓取需要 yt-dlp。请运行 `.venv/bin/python -m pip install -r requirements-obsidian.txt`。") from exc
+    return yt_dlp
+
+
+def youtube_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    raw = config.get("youtube") if isinstance(config.get("youtube"), dict) else {}
+    fetch_cfg = config.get("fetch") if isinstance(config.get("fetch"), dict) else {}
+    return {
+        "max_videos": int(raw.get("max_videos", fetch_cfg.get("youtube_max_videos", 30)) or 30),
+        "full_max_videos": int(raw.get("full_max_videos", fetch_cfg.get("youtube_full_max_videos", 300)) or 300),
+        "subtitle_languages": raw.get("subtitle_languages") or ["en", "en-US", "en-GB", "zh-Hans", "zh-CN", "zh"],
+        "audio_timeout_seconds": float(raw.get("audio_timeout_seconds", 600) or 600),
+    }
+
+
+def normalize_youtube_video_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.netloc:
+        query = parse_qs(parsed.query)
+        video_id = query.get("v", [""])[0].strip()
+        if video_id:
+            return video_id
+        path = parsed.path.strip("/")
+        if parsed.netloc.endswith("youtu.be"):
+            return path.split("/")[0]
+        if path.startswith("shorts/"):
+            return path.split("/", 1)[1].split("/")[0]
+    if re.fullmatch(r"[\w-]{8,}", text):
+        return text
+    return ""
+
+
+def youtube_watch_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def ytdlp_extract_info(url: str, opts: Dict[str, Any]) -> Dict[str, Any]:
+    yt_dlp = import_yt_dlp()
+    base_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
+        "skip_download": True,
+    }
+    base_opts.update(opts)
+    with yt_dlp.YoutubeDL(base_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict):
+        raise RuntimeError("yt-dlp 没有返回 YouTube 数据。请确认 URL 可访问。")
+    return info
+
+
+def youtube_entry_to_video(creator: Dict[str, Any], entry: Dict[str, Any]) -> Optional[CreatorVideo]:
+    video_id = normalize_youtube_video_id(entry.get("id") or entry.get("url") or entry.get("webpage_url"))
+    if not video_id:
+        return None
+    title = compact_title(str(entry.get("title") or ""), video_id)
+    timestamp = entry.get("timestamp") or entry.get("release_timestamp")
+    try:
+        create_time = int(timestamp) if timestamp is not None else None
+    except (TypeError, ValueError):
+        create_time = None
+    tags = creator.get("tags") or ["youtube", "视频"]
+    if not isinstance(tags, list):
+        tags = ["youtube", "视频"]
+    raw = dict(entry)
+    raw.update(creator_runtime_options(creator))
+    raw["creator_language"] = str(creator.get("language") or "")
+    raw["source_language"] = str(creator.get("source_language") or creator.get("language") or "auto")
+    raw["output_language"] = str(creator.get("output_language") or "中文")
+    return CreatorVideo(
+        creator_key=str(creator["key"]),
+        creator_name=str(creator.get("name") or creator["key"]),
+        video_id=f"youtube_{video_id}",
+        source_url=youtube_watch_url(video_id),
+        title=title,
+        create_time=create_time,
+        raw=raw,
+        tags=[str(tag) for tag in tags],
+        platform="youtube",
+    )
+
+
+async def fetch_youtube_videos(
+    creator: Dict[str, Any],
+    config: Dict[str, Any],
+    scan_limit: int = 0,
+    full_history: bool = False,
+    conn: Optional[sqlite3.Connection] = None,
+    run_id: Optional[str] = None,
+) -> List[CreatorVideo]:
+    cfg = youtube_config(config)
+    max_items = int(scan_limit or (cfg["full_max_videos"] if full_history else cfg["max_videos"]))
+    max_items = max(1, max_items)
+    url = str(creator.get("url") or "").strip()
+    if not url:
+        raise RuntimeError("YouTube 内容源 URL 为空")
+    if "youtube.com/@" in url and not re.search(r"/(videos|shorts|streams)(?:$|[/?#])", url):
+        url = url.rstrip("/") + "/videos"
+    info = await asyncio.to_thread(
+        ytdlp_extract_info,
+        url,
+        {
+            "extract_flat": "in_playlist",
+            "playlistend": max_items,
+        },
+    )
+    entries = info.get("entries") if isinstance(info.get("entries"), list) else None
+    if entries is None:
+        entries = [info]
+    videos: List[CreatorVideo] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        if conn and run_id:
+            update_run(conn, run_id, current_stage=f"嗅探 YouTube {index}/{len(entries)}", detected_count=len(videos))
+        video = youtube_entry_to_video(creator, entry)
+        if video and video.video_id not in seen:
+            videos.append(video)
+            seen.add(video.video_id)
+        if len(videos) >= max_items:
+            break
+    return videos
+
+
 async def fetch_creator_videos(
     crawler: Any,
     creator: Dict[str, Any],
@@ -2842,6 +3029,8 @@ async def fetch_creator_videos(
         return await fetch_xiaoyuzhou_episodes(creator, config, scan_limit, full_history, conn, run_id)
     if platform == "wechat":
         return await fetch_wechat_articles(creator, config, scan_limit, full_history, conn, run_id)
+    if platform == "youtube":
+        return await fetch_youtube_videos(creator, config, scan_limit, full_history, conn, run_id)
 
     fetch_cfg = config.get("fetch", {})
     sec_user_id = creator.get("sec_user_id")
@@ -2976,6 +3165,129 @@ async def download_audio_to_temp(video: CreatorVideo, cfg: Dict[str, Any], temp_
     return temp_path
 
 
+def youtube_language_preferences(video: CreatorVideo, config: Dict[str, Any]) -> List[str]:
+    cfg = youtube_config(config)
+    raw_languages = cfg.get("subtitle_languages") or []
+    source_language = str(video.raw.get("source_language") or video.raw.get("creator_language") or "").lower()
+    if "中文" in source_language or source_language in {"zh", "zh-cn", "zh-hans"}:
+        preferred = ["zh-Hans", "zh-CN", "zh", "en", "en-US", "en-GB"]
+    elif "英文" in source_language or source_language in {"en", "en-us", "en-gb", "english"}:
+        preferred = ["en", "en-US", "en-GB", "zh-Hans", "zh-CN", "zh"]
+    else:
+        preferred = []
+    merged = [*preferred, *[str(item) for item in raw_languages]]
+    return list(dict.fromkeys([item for item in merged if item]))
+
+
+def select_youtube_caption(info: Dict[str, Any], languages: List[str]) -> Tuple[str, Dict[str, Any]]:
+    pools = [
+        info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {},
+        info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {},
+    ]
+    for pool in pools:
+        for language in languages:
+            formats = pool.get(language)
+            if not isinstance(formats, list):
+                continue
+            preferred = [item for item in formats if isinstance(item, dict) and item.get("url") and item.get("ext") == "vtt"]
+            if preferred:
+                return language, preferred[0]
+    for pool in pools:
+        for language, formats in pool.items():
+            if not isinstance(formats, list):
+                continue
+            for item in formats:
+                if isinstance(item, dict) and item.get("url") and item.get("ext") == "vtt":
+                    return str(language), item
+    return "", {}
+
+
+def strip_vtt_tags(text: str) -> str:
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_vtt_transcript(text: str) -> str:
+    lines = text.replace("\ufeff", "").splitlines()
+    cues: List[str] = []
+    current_time = ""
+    current_text: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_time, current_text
+        content = " ".join(strip_vtt_tags(line) for line in current_text if strip_vtt_tags(line)).strip()
+        if content:
+            cues.append(f"{current_time} {content}".strip())
+        current_time = ""
+        current_text = []
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith(("WEBVTT", "Kind:", "Language:", "NOTE")):
+            if current_text:
+                flush()
+            continue
+        if "-->" in line:
+            if current_text:
+                flush()
+            start, end = line.split("-->", 1)
+            current_time = f"[{start.strip().split()[0]} - {end.strip().split()[0]}]"
+            continue
+        if re.fullmatch(r"\d+", line):
+            continue
+        current_text.append(line)
+    if current_text:
+        flush()
+
+    deduped: List[str] = []
+    last_text = ""
+    for cue in cues:
+        cue_text = re.sub(r"^\[[^\]]+\]\s*", "", cue).strip()
+        if cue_text and cue_text != last_text:
+            deduped.append(cue)
+            last_text = cue_text
+    return "\n".join(deduped).strip()
+
+
+async def fetch_youtube_subtitle(video: CreatorVideo, info: Dict[str, Any], config: Dict[str, Any]) -> Tuple[str, str]:
+    language, caption = select_youtube_caption(info, youtube_language_preferences(video, config))
+    if not caption:
+        return "", ""
+    url = str(caption.get("url") or "")
+    if not url:
+        return "", ""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        response = await client.get(url, follow_redirects=True)
+        response.raise_for_status()
+    transcript = parse_vtt_transcript(response.text)
+    return transcript, language
+
+
+def download_youtube_audio_sync(video: CreatorVideo, config: Dict[str, Any], temp_dir: Path) -> Path:
+    yt_dlp = import_yt_dlp()
+    target_template = str(temp_dir / f"{video.video_id}.%(ext)s")
+    before = set(temp_dir.glob(f"{video.video_id}.*"))
+    with yt_dlp.YoutubeDL(
+        {
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bestaudio/best",
+            "outtmpl": target_template,
+            "noplaylist": True,
+            "socket_timeout": float(youtube_config(config)["audio_timeout_seconds"]),
+        }
+    ) as ydl:
+        ydl.download([video.source_url])
+    after = set(temp_dir.glob(f"{video.video_id}.*"))
+    created = [path for path in after - before if path.exists() and not path.name.endswith(".part")]
+    if not created:
+        created = [path for path in after if path.exists() and not path.name.endswith(".part")]
+    if not created:
+        raise RuntimeError("YouTube 音频下载失败：没有找到下载后的音频文件")
+    return max(created, key=lambda path: path.stat().st_size)
+
+
 def extract_audio(video_path: Path, audio_path: Path) -> None:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -3081,6 +3393,35 @@ def summary_prompt_path(video: CreatorVideo, cfg: Dict[str, Any]) -> Path:
     return project_path(str(cfg.get("prompt", "local_tools/obsidian_sync/prompts/summarize.md")))
 
 
+def foreign_summary_prompt_path(cfg: Dict[str, Any]) -> Path:
+    return project_path(str(cfg.get("foreign_prompt", "local_tools/obsidian_sync/prompts/foreign_summarize.md")))
+
+
+def likely_non_chinese_content(video: CreatorVideo, transcript: str) -> bool:
+    language = str(video.raw.get("source_language") or video.raw.get("creator_language") or "").strip().lower()
+    if language in {"中文", "chinese", "zh", "zh-cn", "zh-hans", "zh-hant"} or "中文" in language:
+        return False
+    if language in {"英文", "english", "en", "en-us", "en-gb", "日文", "日语", "japanese", "ja", "韩文", "韩语", "korean", "ko"}:
+        return True
+    sample = f"{video.title}\n{transcript[:4000]}"
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", sample))
+    latin = len(re.findall(r"[A-Za-z]", sample))
+    kana = len(re.findall(r"[\u3040-\u30ff]", sample))
+    hangul = len(re.findall(r"[\uac00-\ud7af]", sample))
+    if kana + hangul >= 20:
+        return True
+    if latin >= 80 and cjk / max(1, latin + cjk) < 0.18:
+        return True
+    return False
+
+
+def should_localize_to_chinese(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> bool:
+    output_language = str(video.raw.get("output_language") or cfg.get("output_language") or "中文").strip().lower()
+    if output_language not in {"中文", "zh", "zh-cn", "chinese"} and "中文" not in output_language:
+        return False
+    return video.platform in {"x", "youtube"} and likely_non_chinese_content(video, transcript)
+
+
 def summary_user_content(video: CreatorVideo, transcript: str) -> str:
     published = format_date(video.create_time)
     if video.platform == "weibo":
@@ -3127,6 +3468,25 @@ def summary_user_content(video: CreatorVideo, transcript: str) -> str:
             "节目简介/Shownotes：\n"
             f"{description or '无'}\n\n"
             "逐字稿：\n"
+            f"{transcript}"
+        )
+    if video.platform == "youtube":
+        description = str(video.raw.get("description") or video.raw.get("description_text") or "").strip()
+        transcript_source = str(video.raw.get("transcript_source") or "").strip() or "unknown"
+        subtitle_language = str(video.raw.get("subtitle_language") or "").strip() or "auto"
+        source_language = str(video.raw.get("source_language") or video.raw.get("creator_language") or "").strip() or "auto"
+        return (
+            "YouTube 视频元数据：\n"
+            f"- 频道：{video.creator_name}\n"
+            f"- 标题：{video.title}\n"
+            f"- 链接：{video.source_url}\n"
+            f"- 发布时间：{published}\n"
+            f"- 原始语言：{source_language}\n"
+            f"- 逐字稿来源：{transcript_source}\n"
+            f"- 字幕语言：{subtitle_language}\n\n"
+            "视频简介：\n"
+            f"{description[:3000] or '无'}\n\n"
+            "原文逐字稿：\n"
             f"{transcript}"
         )
     if video.platform == "xiaohongshu":
@@ -3300,7 +3660,7 @@ def chunk_podcast_transcript(video: CreatorVideo, transcript: str, cfg: Dict[str
 
 
 def call_ai_summary(video: CreatorVideo, transcript: str, cfg: Dict[str, Any]) -> str:
-    prompt_path = summary_prompt_path(video, cfg)
+    prompt_path = foreign_summary_prompt_path(cfg) if should_localize_to_chinese(video, transcript, cfg) else summary_prompt_path(video, cfg)
     system_prompt = prompt_path.read_text(encoding="utf-8")
     chunked = chunk_podcast_transcript(video, transcript, cfg)
     if chunked:
@@ -3352,10 +3712,24 @@ def build_frontmatter(video: CreatorVideo, status: str, *, summary: str = "", bo
         id_field = "episode_id"
         author_field = "podcast"
         author_key_field = "podcast_key"
+    elif video.platform == "youtube":
+        id_field = "youtube_id"
+        author_field = "channel"
+        author_key_field = "channel_key"
     else:
         id_field = "video_id"
         author_field = "creator"
         author_key_field = "creator_key"
+    extra_lines = ""
+    source_language = str(video.raw.get("source_language") or video.raw.get("creator_language") or "").strip()
+    output_language = str(video.raw.get("output_language") or "").strip()
+    transcript_source = str(video.raw.get("transcript_source") or "").strip()
+    if source_language:
+        extra_lines += f"source_language: {format_frontmatter_value(source_language)}\n"
+    if output_language:
+        extra_lines += f"output_language: {format_frontmatter_value(output_language)}\n"
+    if transcript_source:
+        extra_lines += f"transcript_source: {format_frontmatter_value(transcript_source)}\n"
     return (
         "---\n"
         f"source: {format_frontmatter_value(video.platform)}\n"
@@ -3366,6 +3740,7 @@ def build_frontmatter(video: CreatorVideo, status: str, *, summary: str = "", bo
         f"published_at: {format_frontmatter_value(format_date(video.create_time))}\n"
         f"processed_at: {format_frontmatter_value(utc_now())}\n"
         f"sync_status: {format_frontmatter_value(status)}\n"
+        f"{extra_lines}"
         "tags:\n"
         f"{tag_lines}\n"
         "---\n\n"
@@ -3484,6 +3859,39 @@ def build_podcast_markdown(video: CreatorVideo, summary: str, transcript: str, s
     return "".join(parts)
 
 
+def build_youtube_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
+    frontmatter = build_frontmatter(video, status, summary=summary, body=transcript)
+    title = video.title if video.title != video.video_id else f"YouTube 视频 {format_date(video.create_time)}"
+    description = str(video.raw.get("description") or video.raw.get("description_text") or "").strip()
+    description_section = f"## 视频简介\n\n{description[:5000]}\n\n" if description else ""
+    transcript_source = str(video.raw.get("transcript_source") or "").strip()
+    source_language = str(video.raw.get("source_language") or video.raw.get("creator_language") or "").strip()
+    meta_lines = []
+    if source_language:
+        meta_lines.append(f"- 原始语言：{source_language}")
+    if transcript_source:
+        meta_lines.append(f"- 逐字稿来源：{transcript_source}")
+    if video.raw.get("subtitle_language"):
+        meta_lines.append(f"- 字幕语言：{video.raw.get('subtitle_language')}")
+    meta_section = f"## 元信息\n\n{chr(10).join(meta_lines)}\n\n" if meta_lines else ""
+    parts = [
+        frontmatter,
+        f"# {title}\n\n",
+        f"[原视频]({video.source_url})\n\n",
+        meta_section,
+        description_section,
+    ]
+    summary = summary.strip()
+    if summary:
+        parts.append(f"{summary}\n\n")
+    if include_transcript:
+        parts.append("## 原文逐字稿\n\n")
+        parts.append(f"{transcript.strip()}\n")
+    if status == "raw":
+        parts.append("\n## 笔记\n\n<!-- Claudian: 在此处生成中文结构化总结 -->\n")
+    return "".join(parts)
+
+
 def build_xiaohongshu_markdown(video: CreatorVideo, summary: str, transcript: str, status: str, include_transcript: bool = True) -> str:
     title = video.title if video.title != video.video_id else f"小红书笔记 {format_date(video.create_time)}"
     original_text = str(video.raw.get("original_text") or "").strip()
@@ -3522,6 +3930,8 @@ def build_markdown(video: CreatorVideo, summary: str, transcript: str, status: s
         return build_wechat_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "xiaoyuzhou":
         return build_podcast_markdown(video, summary, transcript, status, include_transcript)
+    if video.platform == "youtube":
+        return build_youtube_markdown(video, summary, transcript, status, include_transcript)
     if video.platform == "xiaohongshu":
         return build_xiaohongshu_markdown(video, summary, transcript, status, include_transcript)
     return build_douyin_markdown(video, summary, transcript, status, include_transcript)
@@ -3600,7 +4010,7 @@ def retain_processing_outputs(
         shutil.move(str(source_media_path), str(target))
         retained.add(target)
     if retention.get("keep_audio"):
-        if source_media_path and source_media_path.exists() and video.platform == "xiaoyuzhou":
+        if source_media_path and source_media_path.exists() and video.platform in {"xiaoyuzhou", "youtube"}:
             target = sidecar_path(markdown_path, "source-audio", source_media_path.suffix or ".audio")
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(source_media_path), str(target))
@@ -3878,6 +4288,93 @@ async def process_video(
             print(f"WROTE {markdown_path}")
             return status
 
+        if video.platform == "youtube":
+            if run_id:
+                update_run(conn, run_id, current_stage="读取 YouTube 详情", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "读取 YouTube 详情")
+            info = await asyncio.to_thread(ytdlp_extract_info, video.source_url, {"noplaylist": True})
+            if isinstance(info, dict):
+                video.raw.update(info)
+                video.title = compact_title(str(info.get("title") or video.title), video.video_id)
+                timestamp = info.get("timestamp") or info.get("release_timestamp") or video.create_time
+                try:
+                    video.create_time = int(timestamp) if timestamp is not None else video.create_time
+                except (TypeError, ValueError):
+                    pass
+
+            transcript = ""
+            subtitle_language = ""
+            if run_id:
+                update_run(conn, run_id, current_stage="读取 YouTube 字幕", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "读取 YouTube 字幕")
+            try:
+                transcript, subtitle_language = await fetch_youtube_subtitle(video, info, config)
+            except Exception as exc:  # noqa: BLE001 - subtitles are best-effort; audio fallback follows.
+                print(f"WARN youtube subtitle failed {video.video_id}: {type(exc).__name__}: {exc}")
+                transcript = ""
+            if transcript:
+                video.raw["transcript_source"] = "youtube_subtitle"
+                video.raw["subtitle_language"] = subtitle_language
+
+            if not transcript:
+                if run_id:
+                    update_run(conn, run_id, current_stage="下载 YouTube 音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "下载 YouTube 音频")
+                video_path = await asyncio.to_thread(download_youtube_audio_sync, video, config, media_dir)
+                if run_id:
+                    update_run(conn, run_id, current_stage="标准化音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "标准化音频")
+                audio_path = media_dir / f"{video.video_id}.wav"
+                await asyncio.to_thread(extract_audio, video_path, audio_path)
+                transcribe_cfg = dict(config.get("transcribe", {}) or {})
+                transcribe_cfg.update(config.get("youtube_transcribe") or {})
+                if str(video.raw.get("source_language") or "").lower() not in {"中文", "zh", "zh-cn", "zh-hans"}:
+                    transcribe_cfg["language"] = transcribe_cfg.get("language") or "auto"
+                    if str(transcribe_cfg.get("language", "")).lower() == "zh":
+                        transcribe_cfg["language"] = "auto"
+                if run_id:
+                    update_run(conn, run_id, current_stage="转录 YouTube 音频", current_creator=video.creator_name, current_video_id=video.video_id)
+                    upsert_run_item(conn, run_id, video, "running", "转录 YouTube 音频")
+                transcript = await asyncio.to_thread(transcribe_audio, audio_path, transcribe_cfg)
+                video.raw["transcript_source"] = "whisper_audio"
+
+            if skip_summary:
+                summary = ""
+                status = "raw"
+            else:
+                try:
+                    if run_id:
+                        update_run(conn, run_id, current_stage="AI 中文整理", current_creator=video.creator_name, current_video_id=video.video_id)
+                        upsert_run_item(conn, run_id, video, "running", "AI 中文整理")
+                    summary = await asyncio.to_thread(call_ai_summary, video, transcript, summary_config_for_video(video, config))
+                    status = "ok"
+                except Exception as exc:  # noqa: BLE001 - keep transcript even if summary fails.
+                    summary = f"## 摘要\n\nAI 总结失败：`{type(exc).__name__}: {exc}`"
+                    status = "summary_error"
+
+            if run_id:
+                update_run(conn, run_id, current_stage="写入 Markdown", current_creator=video.creator_name, current_video_id=video.video_id)
+                upsert_run_item(conn, run_id, video, "running", "写入 Markdown")
+            markdown = build_markdown(video, summary, transcript, status, include_transcript)
+            markdown_path = output_path_for_video(output_base, video, conn)
+            atomic_write(markdown_path, markdown)
+            retain_processing_outputs(
+                video=video,
+                markdown_path=markdown_path,
+                transcript=transcript,
+                source_media_path=video_path,
+                audio_path=audio_path,
+                retention=retention,
+            )
+            is_success = status in ("ok", "raw")
+            mark_result(conn, video, status, markdown_path, None if is_success else "summary failed", len(transcript))
+            if run_id:
+                item_status = "success" if is_success else "failed"
+                item_error = None if is_success else "AI 总结失败，但原文逐字稿已写入 Markdown"
+                upsert_run_item(conn, run_id, video, item_status, "完成", item_error, markdown_path)
+            print(f"WROTE {markdown_path}")
+            return status
+
         transcript_mode = transcript_mode_for_video(video)
         if run_id:
             update_run(conn, run_id, current_stage="下载视频", current_creator=video.creator_name, current_video_id=video.video_id)
@@ -3996,7 +4493,7 @@ async def sync(args: argparse.Namespace) -> int:
     ]
 
     if not creators:
-        print("No enabled runnable creators. Current runnable platforms: douyin, weibo, x, xiaoyuzhou, wechat, xiaohongshu.")
+        print("No enabled runnable creators. Current runnable platforms: douyin, weibo, x, xiaoyuzhou, wechat, youtube.")
         return 0
 
     final_output_path = (
@@ -4055,7 +4552,7 @@ async def sync(args: argparse.Namespace) -> int:
             print(f"CREATOR {creator_index}/{total_creators} {creator_name}")
             print(f"OUTPUT {platform} {output_base}")
             print(f"FETCH {creator_name}")
-            scan_limit = int(args.limit or 0) if platform in {"weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"} and not args.full_history else 0
+            scan_limit = int(args.limit or 0) if platform in {"weibo", "x", "xiaoyuzhou", "wechat", "youtube"} and not args.full_history else 0
             try:
                 videos = await fetch_creator_videos(crawler, creator, config, scan_limit, args.full_history, conn, run_id)
             except Exception as exc:  # noqa: BLE001 - one source must not break the full run.
@@ -4081,8 +4578,6 @@ async def sync(args: argparse.Namespace) -> int:
                 item_label = "episodes"
             elif platform == "wechat":
                 item_label = "articles"
-            elif platform == "xiaohongshu":
-                item_label = "notes"
             else:
                 item_label = "videos"
             print(f"FOUND {len(videos)} {item_label}")
@@ -4107,7 +4602,7 @@ async def sync(args: argparse.Namespace) -> int:
                     upsert_run_item(conn, run_id, video, "skipped", "已存在", "之前已成功处理，本轮跳过")
                     continue
                 if status == "filtered" and creator_promotion_filter_enabled(creator, config, args) and not args.force:
-                    upsert_run_item(conn, run_id, video, "skipped", "已过滤", "之前已判定为商单/推广/直播通告，本轮跳过")
+                    upsert_run_item(conn, run_id, video, "skipped", "已过滤", "之前已判定为低价值内容，本轮跳过")
                     continue
                 if creator_promotion_filter_enabled(creator, config, args):
                     filter_reason = promotion_filter_reason(video, config)
@@ -4239,7 +4734,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--concurrency", type=int, default=None, help="Parallel video pipelines per creator. Clamped to 1-2.")
     parser.add_argument("--full-history", action="store_true", help="Scan deep history for platforms that support it, e.g. Weibo and podcast RSS.")
     parser.add_argument("--recent-days", type=int, default=0, help="Only process items published within the last N days. Older seen items are skipped for this run.")
-    parser.add_argument("--no-content-filter", action="store_true", help="Disable pre-download filters for sponsored, promotional, and live-announcement content.")
+    parser.add_argument("--no-content-filter", action="store_true", help="Disable pre-download filters for sponsored, promotional, live-announcement, and obvious non-speaking content.")
     parser.add_argument("--pause-file", default="", help="Stop launching new work when this file exists, then mark the run paused.")
     parser.add_argument("--allow-concurrent", action="store_true", help="Allow this sync process to run while another sync.py process is active.")
     return parser.parse_args()

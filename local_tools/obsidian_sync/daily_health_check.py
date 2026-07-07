@@ -30,7 +30,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = PROJECT_ROOT / "local_tools" / "obsidian_sync" / "creators.yaml"
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
-RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"}
+RUNNABLE_PLATFORMS = {"douyin", "weibo", "x", "xiaoyuzhou", "wechat", "youtube"}
 PLATFORM_LABELS = {
     "douyin": "抖音",
     "weibo": "微博",
@@ -38,6 +38,7 @@ PLATFORM_LABELS = {
     "xiaoyuzhou": "小宇宙",
     "wechat": "公众号",
     "xiaohongshu": "小红书",
+    "youtube": "YouTube",
 }
 AUTH_MARKERS = (
     "Cookie 已失效",
@@ -111,6 +112,8 @@ def normalize_platform(value: Any, url: str = "") -> str:
         return "wechat"
     if "xiaohongshu.com" in text:
         return "xiaohongshu"
+    if "youtube.com" in text or "youtu.be" in text:
+        return "youtube"
     return "douyin"
 
 

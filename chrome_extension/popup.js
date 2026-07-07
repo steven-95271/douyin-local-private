@@ -7,8 +7,6 @@ const els = {
   importCookie: document.getElementById("importCookie"),
   importWeiboCookie: document.getElementById("importWeiboCookie"),
   importWechatCookie: document.getElementById("importWechatCookie"),
-  importXiaohongshuCookie: document.getElementById("importXiaohongshuCookie"),
-  importXiaohongshuProfile: document.getElementById("importXiaohongshuProfile"),
   openDashboard: document.getElementById("openDashboard"),
   urls: document.getElementById("urls"),
   status: document.getElementById("status"),
@@ -74,37 +72,8 @@ async function sendToLocal() {
     setStatus("没有可发送的链接");
     return;
   }
-  const xiaohongshuUrls = urls.filter((url) => /xiaohongshu\.com|xhslink\.com/i.test(url));
-  const xiaohongshuItems = xiaohongshuUrls.map((url) => ({
-    url,
-    title: currentItemsByUrl.get(url)?.title || "",
-  }));
-  if (xiaohongshuUrls.length) {
-    setStatus("写入小红书候选链接到同步面板...");
-    const tab = await activeTab();
-    if (!tab.url || !/xiaohongshu\.com/i.test(tab.url)) {
-      setStatus("请先切到小红书博主主页，再发送小红书候选链接");
-      return;
-    }
-    const [{ result }] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: scrapeXiaohongshuProfileFromPage,
-    });
-    if (!result || !result.name) {
-      setStatus("没有读到当前小红书博主名称，无法归档候选链接");
-      return;
-    }
-    const response = await fetch("http://127.0.0.1:8787/api/creator/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ creator: { ...result, manual_urls: xiaohongshuUrls, manual_items: xiaohongshuItems } }),
-    });
-    if (!response.ok) {
-      throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
-    }
-    const data = await response.json();
-    const titledCount = xiaohongshuItems.filter((item) => item.title).length;
-    setStatus(`${data.updated ? "已更新" : "已导入"}小红书博主：${data.creator?.name || result.name}；候选 ${xiaohongshuUrls.length} 条，带标题 ${titledCount} 条`);
+  if (urls.some((url) => /xiaohongshu\.com|xhslink\.com/i.test(url))) {
+    setStatus("小红书平台已暂停接入，插件不会发送小红书候选内容。");
     return;
   }
 
@@ -362,63 +331,15 @@ async function getWechatMpCookies() {
   };
 }
 
-async function getXiaohongshuCookies() {
-  const batches = await Promise.all([
-    getCookiesForUrl("https://www.xiaohongshu.com/"),
-    getCookiesForUrl("https://xiaohongshu.com/"),
-    getCookiesForUrl("https://edith.xiaohongshu.com/"),
-    getCookiesForUrl("https://creator.xiaohongshu.com/"),
-    getCookiesForUrl("https://www.xiaohongshu.com/explore/"),
-    getCookiesForDomain(".xiaohongshu.com"),
-    getCookiesForDomain("xiaohongshu.com"),
-    getCookiesForDomain("www.xiaohongshu.com"),
-    getCookiesForDomain("edith.xiaohongshu.com"),
-    getCookiesForDomain("creator.xiaohongshu.com"),
-    getCookiesForDomain(".xhslink.com"),
-    getDocumentCookiesFromTabs([
-      "https://xiaohongshu.com/*",
-      "https://*.xiaohongshu.com/*",
-      "https://xhslink.com/*",
-      "https://*.xhslink.com/*",
-    ]),
-  ]);
-  const byName = new Map();
-  for (const cookie of batches.flat()) {
-    if (!cookie.name || !cookie.value) continue;
-    byName.set(cookie.name, {
-      value: cookie.value,
-      domain: cookie.domain || "",
-    });
-  }
-  const cookies = Array.from(byName.entries())
-    .sort(([nameA], [nameB]) => nameA.localeCompare(nameB))
-    .map(([name, item]) => `${name}=${item.value}`);
-  const names = Array.from(byName.keys()).sort();
-  const domains = uniq(Array.from(byName.values()).map((item) => item.domain).filter(Boolean)).sort();
-  return {
-    header: cookies.join("; "),
-    count: cookies.length,
-    names,
-    domains,
-    hasLogin: byName.has("web_session") || byName.has("webId") || byName.has("webId.sig") || byName.has("a1") || byName.has("access-token"),
-  };
-}
-
 async function importCookieToDashboard(platform = "douyin") {
-  const label = platform === "weibo" ? "微博" : platform === "wechat" ? "公众号后台" : platform === "xiaohongshu" ? "小红书" : "抖音";
+  const label = platform === "weibo" ? "微博" : platform === "wechat" ? "公众号后台" : "抖音";
   setStatus(`读取${label} Cookie...`);
   const cookie = platform === "weibo"
     ? await getWeiboCookies()
     : platform === "wechat"
       ? await getWechatMpCookies()
-      : platform === "xiaohongshu"
-        ? await getXiaohongshuCookies()
-        : await getDouyinCookies();
+      : await getDouyinCookies();
   if (!cookie.header) {
-    if (platform === "xiaohongshu") {
-      setStatus("没有读到小红书 Cookie。请在同一个 Chrome 用户里打开 xiaohongshu.com 并确认已登录；如果刚更新插件，请先到扩展管理页点“重新加载”。");
-      return;
-    }
     setStatus(`没有读到 Cookie，请先在 Chrome 登录 ${platform === "weibo" ? "weibo.com" : platform === "wechat" ? "mp.weixin.qq.com" : "douyin.com"}`);
     return;
   }
@@ -432,9 +353,7 @@ async function importCookieToDashboard(platform = "douyin") {
     ? { weibo_cookie: cookie.header }
     : platform === "wechat"
       ? { wechat_mp_cookie: cookie.header, wechat_mp_token: cookie.token }
-      : platform === "xiaohongshu"
-        ? { xiaohongshu_cookie: cookie.header }
-        : { douyin_cookie: cookie.header };
+      : { douyin_cookie: cookie.header };
   const response = await fetch("http://127.0.0.1:8787/api/secrets", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -449,109 +368,6 @@ async function importCookieToDashboard(platform = "douyin") {
   setStatus(`${label} Cookie 已导入本地：${cookie.count} 项${cookie.hasLogin ? "，含登录态" : "，未见登录态"}${tokenText}。${names}${domains}`);
 }
 
-function scrapeXiaohongshuProfileFromPage() {
-  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const lineClean = (value) => String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const visibleText = (node) => {
-    if (!node) return "";
-    const style = window.getComputedStyle(node);
-    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return "";
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return "";
-    return clean(node.innerText || node.textContent || "");
-  };
-  const pickVisible = (root, selectors) => {
-    for (const selector of selectors) {
-      for (const node of root.querySelectorAll(selector)) {
-        const text = visibleText(node);
-        if (text && text.length <= 80 && !/[：:]/.test(text) && !/(关注|粉丝|获赞|收藏|小红书号|IP属地)/.test(text)) {
-          return text;
-        }
-      }
-    }
-    return "";
-  };
-  const url = location.href;
-  if (!/xiaohongshu\.com/i.test(location.hostname)) {
-    throw new Error("当前标签页不是小红书页面");
-  }
-  const platformId = (location.pathname.match(/\/user\/profile\/([^/?#]+)/) || [])[1] || "";
-  const candidates = Array.from(document.querySelectorAll("main, section, div"))
-    .map((node) => ({ node, text: clean(node.innerText || "") }))
-    .filter((item) => item.text.includes("小红书号") && item.text.includes("粉丝") && item.text.length < 2500)
-    .sort((a, b) => a.text.length - b.text.length);
-  const root = candidates[0]?.node || document.querySelector("main") || document.body;
-  const rootLines = lineClean(root.innerText || "");
-  let name = pickVisible(root, [
-    ".user-name",
-    ".nickname",
-    "[class*='user-name']",
-    "[class*='nickname']",
-    "[class*='userName']",
-    "[class*='Nickname']",
-  ]);
-  if (!name) {
-    const redIndex = rootLines.findIndex((line) => /小红书号/.test(line));
-    const beforeRed = redIndex >= 0 ? rootLines.slice(Math.max(0, redIndex - 4), redIndex).reverse() : rootLines.slice(0, 8);
-    name = beforeRed.find((line) => line.length <= 80 && !/(首页|搜索|已关注|关注|粉丝|获赞|收藏|小红书号|IP属地|发布|消息|直播)/.test(line)) || "";
-  }
-  if (!name) {
-    name = clean(document.title.replace(/[-_｜|].*$/, ""));
-  }
-
-  const bioLines = [];
-  const redIndex = rootLines.findIndex((line) => /小红书号/.test(line));
-  if (redIndex >= 0) {
-    for (const line of rootLines.slice(redIndex + 1)) {
-      if (/(关注|粉丝|获赞|收藏|笔记|已关注|小红书号|IP属地)/.test(line)) break;
-      if (/^[♀♂]|^[\w\u4e00-\u9fa5]+[省市区县]?$/.test(line) && line.length <= 12) continue;
-      if (line && line !== name) bioLines.push(line);
-      if (bioLines.join(" ").length > 260) break;
-    }
-  }
-  const recentTitles = Array.from(document.querySelectorAll("a, [class*='title'], [class*='Title']"))
-    .map((node) => clean(node.innerText || node.textContent || ""))
-    .filter((text) => text.length >= 3 && text.length <= 80 && !/(首页|搜索|关注|粉丝|获赞|收藏|小红书号|IP属地|发布|消息|直播)/.test(text))
-    .slice(0, 12);
-  return {
-    platform: "xiaohongshu",
-    platform_id: platformId,
-    name,
-    url,
-    bio: bioLines.join("\n"),
-    recent_titles: Array.from(new Set(recentTitles)),
-  };
-}
-
-async function importXiaohongshuProfileToDashboard() {
-  setStatus("读取当前小红书主页...");
-  const tab = await activeTab();
-  if (!tab.url || !/xiaohongshu\.com/i.test(tab.url)) {
-    setStatus("请先切到小红书博主主页，再点导入当前小红书博主");
-    return;
-  }
-  const [{ result }] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: scrapeXiaohongshuProfileFromPage,
-  });
-  if (!result || !result.name) {
-    setStatus("没有读到博主名称。请确认当前页面已经加载出博主资料区。");
-    return;
-  }
-  setStatus(`写入本地同步面板：${result.name}`);
-  const response = await fetch("http://127.0.0.1:8787/api/creator/import", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ creator: result }),
-  });
-  if (!response.ok) {
-    throw new Error(`同步面板返回 HTTP ${response.status}，请确认 8787 面板已启动`);
-  }
-  const data = await response.json();
-  const creator = data.creator || result;
-  setStatus(`${data.updated ? "已更新" : "已导入"}小红书博主：${creator.name}。回到同步面板刷新即可看到。`);
-}
-
 function openDashboard() {
   chrome.tabs.create({ url: "http://127.0.0.1:8787" });
 }
@@ -563,8 +379,6 @@ els.export.addEventListener("click", exportTxt);
 els.importCookie.addEventListener("click", () => importCookieToDashboard("douyin").catch((error) => setStatus(String(error.message || error))));
 els.importWeiboCookie.addEventListener("click", () => importCookieToDashboard("weibo").catch((error) => setStatus(String(error.message || error))));
 els.importWechatCookie.addEventListener("click", () => importCookieToDashboard("wechat").catch((error) => setStatus(String(error.message || error))));
-els.importXiaohongshuCookie.addEventListener("click", () => importCookieToDashboard("xiaohongshu").catch((error) => setStatus(String(error.message || error))));
-els.importXiaohongshuProfile.addEventListener("click", () => importXiaohongshuProfileToDashboard().catch((error) => setStatus(String(error.message || error))));
 els.openDashboard.addEventListener("click", openDashboard);
 
 chrome.storage.local.get({ urls: [], items: [] }, (data) => {

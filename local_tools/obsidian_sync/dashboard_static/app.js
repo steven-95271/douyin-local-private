@@ -20,8 +20,8 @@ const PLATFORM_META = {
   x: { label: "X", runnable: true, defaultTags: ["x", "推文"] },
   xiaoyuzhou: { label: "小宇宙", runnable: true, defaultTags: ["xiaoyuzhou", "播客"] },
   wechat: { label: "公众号", runnable: true, defaultTags: ["wechat", "公众号"] },
-  xiaohongshu: { label: "小红书", runnable: true, defaultTags: ["xiaohongshu", "图文"] },
-  youtube: { label: "YouTube", runnable: false, defaultTags: ["youtube", "视频"] },
+  xiaohongshu: { label: "小红书", runnable: false, defaultTags: ["xiaohongshu", "图文"] },
+  youtube: { label: "YouTube", runnable: true, defaultTags: ["youtube", "视频"] },
   bilibili: { label: "B站", runnable: false, defaultTags: ["bilibili", "视频"] },
   tiktok: { label: "TikTok", runnable: false, defaultTags: ["tiktok", "视频"] },
   kuaishou: { label: "快手", runnable: false, defaultTags: ["kuaishou", "视频"] },
@@ -352,9 +352,7 @@ function renderStatus(status) {
   const weiboCookie = status.accounts?.weibo?.cookie || {};
   const xBackend = status.accounts?.x?.backend || status.platform_health?.x || {};
   const wechatCookie = status.accounts?.wechat?.cookie || {};
-  const xiaohongshuCookie = status.accounts?.xiaohongshu?.cookie || {};
   const douyinLogin = status.accounts?.douyin?.browser_login || {};
-  const xiaohongshuLogin = status.accounts?.xiaohongshu?.browser_login || {};
   badge($("douyinCookieBadge"), douyinCookie.ready ? "抖音 Cookie 已保存" : "抖音未登录", douyinCookie.ready ? "ok" : "bad");
   const weiboBadge = serverAuthBadge(weiboCookie, {
     ok: "微博登录 OK",
@@ -372,12 +370,10 @@ function renderStatus(status) {
     missing: "公众号后台缺失",
   });
   badge($("wechatCookieBadge"), wechatBadge.text, wechatBadge.state);
-  badge($("xiaohongshuCookieBadge"), xiaohongshuCookie.ready ? "小红书 Cookie 已保存" : "小红书未登录", xiaohongshuCookie.ready ? "ok" : "");
   $("douyinAccountText").textContent = browserLoginText("抖音", douyinCookie, douyinLogin);
   $("weiboAccountText").textContent = serverAuthText("微博", weiboCookie, "未导入 Cookie；微博抓取需要先导入");
   $("xAccountText").textContent = xBackend.ready ? (xBackend.message || "OpenCLI 可用，会复用本机 X 登录态") : (xBackend.message || "未检测到 OpenCLI；X 抓取暂不可用");
   $("wechatAccountText").textContent = serverAuthText("公众号后台", wechatCookie, "未导入公众号后台登录态；按名称抓取需要先导入");
-  $("xiaohongshuAccountText").textContent = browserLoginText("小红书", xiaohongshuCookie, xiaohongshuLogin);
   const modelApi = status.model_api || status.deepseek || {};
   const providerLabel = (modelApi.provider || "模型").toUpperCase();
   badge($("keyBadge"), modelApi.ready ? `${providerLabel} OK` : `${providerLabel} 缺失`, modelApi.ready ? "ok" : "bad");
@@ -765,6 +761,8 @@ function creatorTemplate(creator = {}) {
     <input data-field="sec_user_id" type="hidden" value="${escapeHtml(creator.sec_user_id || "")}">
     <input data-field="key" type="hidden" value="${escapeHtml(creator.key || "")}">
     <input data-field="bio" type="hidden" value="${escapeHtml(creator.bio || "")}">
+    <input data-field="source_language" type="hidden" value="${escapeHtml(creator.source_language || "")}">
+    <input data-field="output_language" type="hidden" value="${escapeHtml(creator.output_language || "")}">
     <input data-field="platform_id" type="hidden" value="${escapeHtml(creator.platform_id || "")}">
     <input data-field="manual_urls" type="hidden" value="${escapeHtml((creator.manual_urls || []).join("\n"))}">
     <input data-field="manual_items" type="hidden" value="${escapeHtml(JSON.stringify(creator.manual_items || []))}">
@@ -793,7 +791,7 @@ function creatorTemplate(creator = {}) {
     </label>
     <label>Cookie<input data-field="cookie_profile" value="${escapeHtml(creator.cookie_profile || "")}" placeholder="默认"></label>
     <label class="check"><input data-field="enabled" type="checkbox" ${creator.enabled !== false ? "checked" : ""}><span>启用</span></label>
-    <label class="check"><input data-field="filter_promotions" type="checkbox" ${creator.filter_promotions === false ? "" : "checked"}><span>过滤推广内容</span></label>
+    <label class="check"><input data-field="filter_promotions" type="checkbox" ${creator.filter_promotions === false ? "" : "checked"}><span>过滤低价值内容</span></label>
     <label>标签<input data-field="tags" value="${escapeHtml(tags.join(", "))}"></label>
     <button type="button" class="secondary" data-action="resolve">URL 补全</button>
     <button type="button" class="secondary" data-action="remove">删除</button>
@@ -801,6 +799,7 @@ function creatorTemplate(creator = {}) {
   `;
   row.querySelector('[data-action="remove"]').addEventListener("click", () => {
     row.remove();
+    cleanupEmptyCreatorGroups();
     renderCreatorSelect();
     applyCreatorFilter();
   });
@@ -825,13 +824,69 @@ function outputSubdirInputs() {
     x: $("outputSubdirX"),
     xiaoyuzhou: $("outputSubdirXiaoyuzhou"),
     wechat: $("outputSubdirWechat"),
-    xiaohongshu: $("outputSubdirXiaohongshu"),
     youtube: $("outputSubdirYoutube"),
     bilibili: $("outputSubdirBilibili"),
     tiktok: $("outputSubdirTiktok"),
     kuaishou: $("outputSubdirKuaishou"),
     tieba: $("outputSubdirTieba"),
     zhihu: $("outputSubdirZhihu"),
+  };
+}
+
+function creatorGroupData(creator = {}) {
+  const platform = normalizePlatform(creator.platform, creator.url);
+  const category = String(creator.category || "未分类").trim() || "未分类";
+  return {
+    key: `${platform}::${category}`,
+    platform,
+    category,
+  };
+}
+
+function findCreatorGroup(key) {
+  return Array.from(document.querySelectorAll(".creator-group")).find((group) => group.dataset.groupKey === key) || null;
+}
+
+function ensureCreatorGroup(creator = {}) {
+  const data = creatorGroupData(creator);
+  const existing = findCreatorGroup(data.key);
+  if (existing) return existing;
+  const group = document.createElement("details");
+  group.className = "creator-group";
+  group.dataset.groupKey = data.key;
+  group.dataset.platform = data.platform;
+  group.dataset.category = data.category;
+  group.innerHTML = `
+    <summary class="creator-group-summary">
+      <span class="platform-pill ${escapeHtml(data.platform)}">${escapeHtml(platformLabel(data.platform))}</span>
+      <strong>${escapeHtml(data.category)}</strong>
+      <span class="badge" data-group-count>0 个来源</span>
+    </summary>
+    <div class="creator-group-body"></div>
+  `;
+  $("creatorList").appendChild(group);
+  return group;
+}
+
+function appendCreatorRowToGroup(row, creator = {}) {
+  const group = ensureCreatorGroup(creator);
+  group.querySelector(".creator-group-body").appendChild(row);
+  return group;
+}
+
+function cleanupEmptyCreatorGroups() {
+  for (const group of Array.from(document.querySelectorAll(".creator-group"))) {
+    if (!group.querySelector(".creator-row")) {
+      group.remove();
+    }
+  }
+}
+
+function creatorFromRowForGrouping(row) {
+  return {
+    platform: row.querySelector('[data-field="platform"]').value,
+    url: row.querySelector('[data-field="url"]').value,
+    category: row.querySelector('[data-field="category"]').value,
   };
 }
 
@@ -845,7 +900,6 @@ function renderConfig(config) {
   outputInputs.x.value = outputSubdirs.x || "X/内容源";
   outputInputs.xiaoyuzhou.value = outputSubdirs.xiaoyuzhou || "Podcast/小宇宙";
   outputInputs.wechat.value = outputSubdirs.wechat || "WeChat/公众号";
-  outputInputs.xiaohongshu.value = outputSubdirs.xiaohongshu || "Xiaohongshu/内容源";
   outputInputs.youtube.value = outputSubdirs.youtube || "YouTube/视频博主";
   outputInputs.bilibili.value = outputSubdirs.bilibili || "Bilibili/视频博主";
   outputInputs.tiktok.value = outputSubdirs.tiktok || "TikTok/视频博主";
@@ -863,7 +917,7 @@ function renderConfig(config) {
   const list = $("creatorList");
   list.innerHTML = "";
   for (const creator of config.creators || []) {
-    list.appendChild(creatorTemplate(creator));
+    appendCreatorRowToGroup(creatorTemplate(creator), creator);
   }
   renderCreatorSelect();
   applyCreatorFilter();
@@ -932,26 +986,30 @@ function applyCreatorFilter() {
     const matchedText = !query || creatorSearchText(row).includes(query);
     const matched = matchedPlatform && matchedText;
     if (matched) matchedRows.push(row);
-    row.hidden = true;
+    row.hidden = !matched;
   }
-  const pageSize = state.creatorPageSize;
-  const totalPages = Math.max(1, Math.ceil(matchedRows.length / pageSize));
-  state.creatorPage = Math.max(1, Math.min(state.creatorPage || 1, totalPages));
-  const start = (state.creatorPage - 1) * pageSize;
-  const end = start + pageSize;
-  matchedRows.slice(start, end).forEach((row) => {
-    row.hidden = false;
-  });
+  cleanupEmptyCreatorGroups();
+  const activeFilter = Boolean(query || platformFilter !== "all");
+  let visibleGroups = 0;
+  for (const group of Array.from(document.querySelectorAll(".creator-group"))) {
+    const groupRows = Array.from(group.querySelectorAll(".creator-row"));
+    const visibleRows = groupRows.filter((row) => !row.hidden);
+    group.hidden = visibleRows.length === 0;
+    if (!group.hidden) visibleGroups += 1;
+    const count = group.querySelector("[data-group-count]");
+    if (count) {
+      count.textContent = activeFilter ? `${visibleRows.length}/${groupRows.length} 个来源` : `${groupRows.length} 个来源`;
+    }
+    if (activeFilter && visibleRows.length) {
+      group.open = true;
+    }
+  }
   const enabled = rows.filter((row) => row.querySelector('[data-field="enabled"]').checked).length;
   const runnable = rows.filter((row) => row.querySelector('[data-field="enabled"]').checked && isRunnablePlatform(row.querySelector('[data-field="platform"]').value)).length;
   $("creatorCount").textContent = `${matchedRows.length}/${rows.length} 个来源 · 启用 ${enabled} · 可抓取 ${runnable}`;
   const pager = $("creatorPager");
   if (pager) {
-    pager.innerHTML = `
-      <span>第 ${state.creatorPage}/${totalPages} 页 · 每页 ${pageSize} 个</span>
-      <button type="button" class="secondary small" data-action="creator-prev" ${state.creatorPage <= 1 ? "disabled" : ""}>上一页</button>
-      <button type="button" class="secondary small" data-action="creator-next" ${state.creatorPage >= totalPages ? "disabled" : ""}>下一页</button>
-    `;
+    pager.innerHTML = `<span>显示 ${matchedRows.length}/${rows.length} 个来源 · ${visibleGroups} 个分组</span>`;
   }
 }
 
@@ -969,6 +1027,8 @@ function readCreators() {
       url: row.querySelector('[data-field="url"]').value.trim(),
       sec_user_id: row.querySelector('[data-field="sec_user_id"]').value.trim(),
       platform_id: row.querySelector('[data-field="platform_id"]').value.trim(),
+      source_language: row.querySelector('[data-field="source_language"]').value.trim(),
+      output_language: row.querySelector('[data-field="output_language"]').value.trim(),
       manual_urls: row.querySelector('[data-field="manual_urls"]').value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
       manual_items: JSON.parse(row.querySelector('[data-field="manual_items"]').value || "[]"),
       weibo_uid: row.querySelector('[data-field="weibo_uid"]').value.trim(),
@@ -1068,9 +1128,6 @@ function renderCreatorSelect() {
     `;
     button.addEventListener("click", () => {
       hidden.value = creator.key;
-      if (normalizePlatform(creator.platform) === "xiaohongshu") {
-        $("aiSummaryRun").checked = false;
-      }
       renderCreatorSelect();
     });
     picker.appendChild(button);
@@ -1087,7 +1144,7 @@ async function resolveCreator(row) {
   if (!query) {
     throw new Error(platform === "wechat" ? "请先在名称栏填写公众号名称" : "请先填写主页 URL");
   }
-  if (!["douyin", "weibo", "x", "xiaoyuzhou", "wechat", "xiaohongshu"].includes(platform)) {
+  if (!["douyin", "weibo", "x", "xiaoyuzhou", "wechat", "youtube"].includes(platform)) {
     throw new Error(`${platformLabel(platform)} URL 补全和抓取适配器下一阶段接入。现在可以先手动保存为内容源。`);
   }
   const button = row.querySelector('[data-action="resolve"]');
@@ -1104,6 +1161,8 @@ async function resolveCreator(row) {
     row.querySelector('[data-field="url"]').value = result.creator.url || url;
     row.querySelector('[data-field="sec_user_id"]').value = result.creator.sec_user_id || "";
     row.querySelector('[data-field="platform_id"]').value = result.creator.platform_id || "";
+    row.querySelector('[data-field="source_language"]').value = result.creator.source_language || result.creator.language || "";
+    row.querySelector('[data-field="output_language"]').value = result.creator.output_language || "";
     row.querySelector('[data-field="manual_urls"]').value = (result.creator.manual_urls || []).join("\n");
     row.querySelector('[data-field="manual_items"]').value = JSON.stringify(result.creator.manual_items || []);
     row.querySelector('[data-field="weibo_uid"]').value = result.creator.weibo_uid || "";
@@ -1122,6 +1181,7 @@ async function resolveCreator(row) {
     row.querySelector('[data-field="cookie_profile"]').value = result.creator.cookie_profile || "";
     row.querySelector('[data-field="tags"]').value = (result.creator.tags || defaultTagsForPlatform(platform)).join(", ");
     updateCreatorSummary(row);
+    appendCreatorRowToGroup(row, creatorFromRowForGrouping(row)).open = true;
     renderCreatorSelect();
     applyCreatorFilter();
     toast(`内容源信息已补全：${result.creator.name || "未命名来源"}`);
@@ -1155,7 +1215,6 @@ async function saveConfig(includeCreators) {
       x: outputInputs.x.value.trim(),
       xiaoyuzhou: outputInputs.xiaoyuzhou.value.trim(),
       wechat: outputInputs.wechat.value.trim(),
-      xiaohongshu: outputInputs.xiaohongshu.value.trim(),
       youtube: outputInputs.youtube.value.trim(),
       bilibili: outputInputs.bilibili.value.trim(),
       tiktok: outputInputs.tiktok.value.trim(),
@@ -1173,6 +1232,7 @@ async function saveConfig(includeCreators) {
     content_filter: {
       enabled: $("filterPromotions").checked,
       filter_promotions: $("filterPromotions").checked,
+      filter_non_speech: $("filterPromotions").checked,
       min_score: 6,
     },
   };
@@ -1455,7 +1515,7 @@ async function openTarget(target) {
 }
 
 $("addCreator").addEventListener("click", () => {
-  $("creatorList").appendChild(creatorTemplate({
+  const creator = {
     key: "",
     platform: "douyin",
     name: "",
@@ -1467,7 +1527,11 @@ $("addCreator").addEventListener("click", () => {
     bio: "",
     enabled: true,
     tags: defaultTagsForPlatform("douyin"),
-  }));
+  };
+  const row = creatorTemplate(creator);
+  const group = appendCreatorRowToGroup(row, creator);
+  group.open = true;
+  row.open = true;
   renderCreatorSelect();
   applyCreatorFilter();
 });
@@ -1476,7 +1540,6 @@ $("saveCreators").addEventListener("click", () => saveConfig(true).catch((error)
 $("saveSettings").addEventListener("click", () => saveConfig(false).catch((error) => toast(error.message)));
 $("saveSecrets").addEventListener("click", () => saveSecrets().catch((error) => toast(error.message)));
 $("douyinQrLogin").addEventListener("click", () => startBrowserLogin("douyin").catch((error) => toast(error.message)));
-$("xiaohongshuQrLogin").addEventListener("click", () => startBrowserLogin("xiaohongshu").catch((error) => toast(error.message)));
 $("refresh").addEventListener("click", () => refreshStatus().catch((error) => toast(error.message)));
 $("verifyWeiboAuth").addEventListener("click", () => verifyAuth("weibo").catch((error) => toast(error.message)));
 $("verifyWechatAuth").addEventListener("click", () => verifyAuth("wechat").catch((error) => toast(error.message)));
@@ -1490,7 +1553,13 @@ $("creatorList").addEventListener("input", () => {
   renderCreatorSelect();
   applyCreatorFilter();
 });
-$("creatorList").addEventListener("change", () => {
+$("creatorList").addEventListener("change", (event) => {
+  const target = event.target;
+  const row = target && target.closest ? target.closest(".creator-row") : null;
+  const field = target?.dataset?.field || "";
+  if (row && ["platform", "category", "url"].includes(field)) {
+    appendCreatorRowToGroup(row, creatorFromRowForGrouping(row)).open = true;
+  }
   renderCreatorSelect();
   applyCreatorFilter();
 });
