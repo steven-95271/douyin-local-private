@@ -1,22 +1,17 @@
 # docker-image.yml
 name: Publish Docker image   # workflow名称，可以在Github项目主页的【Actions】中看到所有的workflow
 
-on:   # 配置触发workflow的事件
-  push:
-    branches:   # main分支有push时触发此workflow
-      - 'main'
-    tags:       # tag更新时触发此workflow
-      - '*'
+on:   # 仅手动触发；本项目当前不自动发布 Docker 镜像
   workflow_dispatch:
-          inputs:
-              name:
-                  description: 'Person to greet'
-                  required: true
-                  default: 'Mona the Octocat'
-              home:
-                  description: 'location'
-                  required: false
-                  default: 'The Octoverse'       
+    inputs:
+      name:
+        description: 'Person to greet'
+        required: true
+        default: 'Mona the Octocat'
+      home:
+        description: 'location'
+        required: false
+        default: 'The Octoverse'
       
 
 # 定义环境变量, 后面会使用
